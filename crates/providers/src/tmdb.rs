@@ -3,29 +3,32 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use application_utils::get_base_http_client;
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use common_models::{IdObject, NamedObject, PersonSourceSpecifics, SearchDetails, StoredUrl};
-use common_utils::{convert_date_to_year, convert_string_to_date, SHOW_SPECIAL_SEASON_NAMES};
+use common_models::{
+    EntityAssets, EntityRemoteVideo, EntityRemoteVideoSource, IdObject, NamedObject,
+    PersonSourceSpecifics, SearchDetails,
+};
+use common_utils::{SHOW_SPECIAL_SEASON_NAMES, convert_date_to_year, convert_string_to_date};
 use database_models::metadata_group::MetadataGroupWithoutId;
 use dependent_models::{
-    ApplicationCacheKey, ApplicationCacheValue, MetadataGroupSearchResponse, MetadataPersonRelated,
-    PeopleSearchResponse, PersonDetails, SearchResults, TmdbLanguage, TmdbSettings,
+    ApplicationCacheKey, ApplicationCacheValue, MetadataPersonRelated, PersonDetails,
+    SearchResults, TmdbLanguage, TmdbSettings,
 };
 use enum_models::{MediaLot, MediaSource};
 use hashbag::HashBag;
 use itertools::Itertools;
 use media_models::{
-    CommitMediaInput, MetadataDetails, MetadataExternalIdentifiers, MetadataGroupSearchItem,
-    MetadataImage, MetadataImageForMediaDetails, MetadataSearchItem, MetadataVideo,
-    MetadataVideoSource, MovieSpecifics, PartialMetadataPerson, PartialMetadataWithoutId,
-    PeopleSearchItem, ShowEpisode, ShowSeason, ShowSpecifics, UniqueMediaIdentifier, WatchProvider,
+    CommitMetadataGroupInput, MetadataDetails, MetadataExternalIdentifiers,
+    MetadataGroupSearchItem, MetadataSearchItem, MovieSpecifics, PartialMetadataPerson,
+    PartialMetadataWithoutId, PeopleSearchItem, ShowEpisode, ShowSeason, ShowSpecifics,
+    UniqueMediaIdentifier, WatchProvider,
 };
 use reqwest::{
-    header::{HeaderValue, AUTHORIZATION},
     Client,
+    header::{AUTHORIZATION, HeaderValue},
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -355,6 +358,45 @@ impl TmdbService {
             .map_err(|e| anyhow!(e))?;
         rsp.json().await.map_err(|e| anyhow!(e))
     }
+
+    async fn get_trending_media(&self, media_type: &str) -> Result<Vec<PartialMetadataWithoutId>> {
+        let mut trending = vec![];
+        for page in 1..=3 {
+            let rsp = self
+                .client
+                .get(format!("{}/trending/{}/day", URL, media_type))
+                .query(&json!({
+                    "page": page,
+                    "language": self.language,
+                }))
+                .send()
+                .await
+                .map_err(|e| anyhow!(e))?;
+            let data: TmdbListResponse = rsp.json().await.map_err(|e| anyhow!(e))?;
+            for entry in data.results.into_iter() {
+                let title = match entry.title {
+                    Some(n) => n,
+                    _ => continue,
+                };
+                trending.push(PartialMetadataWithoutId {
+                    title,
+                    source: MediaSource::Tmdb,
+                    identifier: entry.id.to_string(),
+                    image: entry.poster_path.map(|p| self.get_image_url(p)),
+                    lot: match media_type {
+                        "movie" => MediaLot::Movie,
+                        "tv" => MediaLot::Show,
+                        _ => continue,
+                    },
+                    ..Default::default()
+                });
+            }
+            if data.page >= data.total_pages {
+                break;
+            }
+        }
+        Ok(trending)
+    }
 }
 
 pub struct NonMediaTmdbService {
@@ -375,9 +417,9 @@ impl MediaProvider for NonMediaTmdbService {
         &self,
         query: &str,
         page: Option<i32>,
-        source_specifics: &Option<PersonSourceSpecifics>,
         display_nsfw: bool,
-    ) -> Result<PeopleSearchResponse> {
+        source_specifics: &Option<PersonSourceSpecifics>,
+    ) -> Result<SearchResults<PeopleSearchItem>> {
         let language = &self
             .base
             .supporting_service
@@ -540,7 +582,6 @@ impl MediaProvider for NonMediaTmdbService {
         let resp = PersonDetails {
             related_metadata,
             name: name.clone(),
-            images: Some(images),
             source: MediaSource::Tmdb,
             website: details.homepage,
             birth_date: details.birthday,
@@ -559,6 +600,10 @@ impl MediaProvider for NonMediaTmdbService {
                 3 => Some("Non-Binary".to_owned()),
                 _ => None,
             }),
+            assets: EntityAssets {
+                remote_images: images,
+                ..Default::default()
+            },
             ..Default::default()
         };
         Ok(resp)
@@ -665,11 +710,11 @@ impl MediaProvider for TmdbMovieService {
             .await
             .map_err(|e| anyhow!(e))?;
         let data: TmdbMediaEntry = rsp.json().await.map_err(|e| anyhow!(e))?;
-        let mut videos = vec![];
+        let mut remote_videos = vec![];
         if let Some(vid) = data.videos {
-            videos.extend(vid.results.into_iter().map(|vid| MetadataVideo {
-                identifier: StoredUrl::Url(vid.key),
-                source: MetadataVideoSource::Youtube,
+            remote_videos.extend(vid.results.into_iter().map(|vid| EntityRemoteVideo {
+                url: vid.key,
+                source: EntityRemoteVideoSource::Youtube,
             }))
         }
         let rsp = self
@@ -758,15 +803,22 @@ impl MediaProvider for TmdbMovieService {
             .get_external_identifiers("movie", identifier)
             .await?;
         let title = data.title.clone().unwrap();
+
+        let remote_images = image_ids
+            .into_iter()
+            .unique()
+            .map(|p| self.base.get_image_url(p))
+            .collect();
+
         Ok(MetadataDetails {
             people,
-            videos,
             suggestions,
             watch_providers,
             is_nsfw: data.adult,
             title: title.clone(),
             lot: MediaLot::Movie,
             source: MediaSource::Tmdb,
+            description: data.overview,
             identifier: data.id.to_string(),
             production_status: data.status.clone(),
             external_identifiers: Some(external_identifiers),
@@ -775,20 +827,17 @@ impl MediaProvider for TmdbMovieService {
                 .release_date
                 .clone()
                 .and_then(|r| convert_string_to_date(&r)),
-            description: data.overview,
             genres: data
                 .genres
                 .unwrap_or_default()
                 .into_iter()
                 .map(|g| g.name)
                 .collect(),
-            url_images: image_ids
-                .into_iter()
-                .unique()
-                .map(|p| MetadataImageForMediaDetails {
-                    image: self.base.get_image_url(p),
-                })
-                .collect(),
+            assets: EntityAssets {
+                remote_images,
+                remote_videos,
+                ..Default::default()
+            },
             publish_year: data
                 .release_date
                 .as_ref()
@@ -806,13 +855,14 @@ impl MediaProvider for TmdbMovieService {
                 .map(|av| av * dec!(10)),
             groups: Vec::from_iter(data.belongs_to_collection)
                 .into_iter()
-                .map(|c| CommitMediaInput {
+                .map(|c| CommitMetadataGroupInput {
                     name: "Loading...".to_string(),
                     unique: UniqueMediaIdentifier {
                         lot: MediaLot::Movie,
                         source: MediaSource::Tmdb,
                         identifier: c.id.to_string(),
                     },
+                    ..Default::default()
                 })
                 .collect(),
             ..Default::default()
@@ -824,7 +874,7 @@ impl MediaProvider for TmdbMovieService {
         query: &str,
         page: Option<i32>,
         display_nsfw: bool,
-    ) -> Result<MetadataGroupSearchResponse> {
+    ) -> Result<SearchResults<MetadataGroupSearchItem>> {
         let page = page.unwrap_or(1);
         let rsp = self
             .base
@@ -923,19 +973,17 @@ impl MediaProvider for TmdbMovieService {
                     "https://www.themoviedb.org/collections/{}-{}",
                     identifier, title
                 )),
-                images: Some(
-                    images
-                        .into_iter()
-                        .unique()
-                        .map(|p| MetadataImage {
-                            url: StoredUrl::Url(self.base.get_image_url(p)),
-                        })
-                        .collect(),
-                ),
-                ..Default::default()
+                assets: EntityAssets {
+                    remote_images: images,
+                    ..Default::default()
+                },
             },
             parts,
         ))
+    }
+
+    async fn get_trending_media(&self) -> Result<Vec<PartialMetadataWithoutId>> {
+        self.base.get_trending_media("movie").await
     }
 }
 
@@ -966,11 +1014,11 @@ impl MediaProvider for TmdbShowService {
             .await
             .map_err(|e| anyhow!(e))?;
         let show_data: TmdbMediaEntry = rsp.json().await.map_err(|e| anyhow!(e))?;
-        let mut videos = vec![];
+        let mut remote_videos = vec![];
         if let Some(vid) = show_data.videos {
-            videos.extend(vid.results.into_iter().map(|vid| MetadataVideo {
-                identifier: StoredUrl::Url(vid.key),
-                source: MetadataVideoSource::Youtube,
+            remote_videos.extend(vid.results.into_iter().map(|vid| EntityRemoteVideo {
+                url: vid.key,
+                source: EntityRemoteVideoSource::Youtube,
             }))
         }
         let mut image_ids = Vec::from_iter(show_data.poster_path);
@@ -1116,9 +1164,15 @@ impl MediaProvider for TmdbShowService {
         let watch_providers = self.base.get_all_watch_providers("tv", identifier).await?;
         let external_identifiers = self.base.get_external_identifiers("tv", identifier).await?;
         let title = show_data.name.unwrap();
+
+        let remote_images = image_ids
+            .into_iter()
+            .unique()
+            .map(|p| self.base.get_image_url(p))
+            .collect();
+
         Ok(MetadataDetails {
             people,
-            videos,
             suggestions,
             watch_providers,
             lot: MediaLot::Show,
@@ -1151,13 +1205,11 @@ impl MediaProvider for TmdbShowService {
                 .map(|g| g.name)
                 .unique()
                 .collect(),
-            url_images: image_ids
-                .into_iter()
-                .unique()
-                .map(|p| MetadataImageForMediaDetails {
-                    image: self.base.get_image_url(p),
-                })
-                .collect(),
+            assets: EntityAssets {
+                remote_images,
+                remote_videos,
+                ..Default::default()
+            },
             show_specifics: Some(ShowSpecifics {
                 runtime: if total_runtime == 0 {
                     None
@@ -1260,6 +1312,10 @@ impl MediaProvider for TmdbShowService {
             },
             items: resp.to_vec(),
         })
+    }
+
+    async fn get_trending_media(&self) -> Result<Vec<PartialMetadataWithoutId>> {
+        self.base.get_trending_media("tv").await
     }
 }
 

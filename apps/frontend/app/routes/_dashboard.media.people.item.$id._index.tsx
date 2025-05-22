@@ -24,7 +24,6 @@ import {
 	IconMessageCircle2,
 	IconUser,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useLoaderData } from "react-router";
 import { $path } from "safe-routes";
@@ -42,9 +41,9 @@ import {
 	PartialMetadataDisplay,
 	ToggleMediaMonitorMenuItem,
 } from "~/components/media";
-import { clientGqlService, getMetadataGroupDetailsQuery } from "~/lib/generals";
-import { useUserPreferences } from "~/lib/hooks";
-import { useAddEntityToCollection, useReviewEntity } from "~/lib/state/media";
+import { clientGqlService } from "~/lib/common";
+import { useMetadataGroupDetails, useUserPreferences } from "~/lib/hooks";
+import { useAddEntityToCollections, useReviewEntity } from "~/lib/state/media";
 import { serverGqlService } from "~/lib/utilities.server";
 import type { Route } from "./+types/_dashboard.media.people.item.$id._index";
 
@@ -81,7 +80,7 @@ export default function Page() {
 	const loaderData = useLoaderData<typeof loader>();
 	const userPreferences = useUserPreferences();
 	const [_r, setEntityToReview] = useReviewEntity();
-	const [_a, setAddEntityToCollectionData] = useAddEntityToCollection();
+	const [_a, setAddEntityToCollectionsData] = useAddEntityToCollections();
 	const [mediaRoleFilter, setMediaRoleFilter] = useLocalStorage(
 		"MediaTabRoleFilter",
 		loaderData.personDetails.associatedMetadata.map((c) => c.name).at(0) ||
@@ -126,7 +125,7 @@ export default function Page() {
 		<Container>
 			<MediaDetailsLayout
 				title={loaderData.personDetails.details.name}
-				images={loaderData.personDetails.details.displayImages}
+				assets={loaderData.personDetails.details.assets}
 				externalLink={{
 					source: loaderData.personDetails.details.source,
 					href: loaderData.personDetails.details.sourceUrl,
@@ -300,7 +299,7 @@ export default function Page() {
 								<Button
 									variant="outline"
 									onClick={() => {
-										setAddEntityToCollectionData({
+										setAddEntityToCollectionsData({
 											entityId: loaderData.personId,
 											entityLot: EntityLot.Person,
 											alreadyInCollections:
@@ -375,14 +374,14 @@ const MetadataDisplay = (props: {
 const MetadataGroupDisplay = (props: {
 	metadataGroupId: string;
 }) => {
-	const { data: metadataGroupDetails } = useQuery(
-		getMetadataGroupDetailsQuery(props.metadataGroupId),
+	const { data: metadataGroupDetails } = useMetadataGroupDetails(
+		props.metadataGroupId,
 	);
 
 	return (
 		<BaseEntityDisplay
 			title={metadataGroupDetails?.details.title}
-			image={metadataGroupDetails?.details.displayImages[0]}
+			image={metadataGroupDetails?.details.assets.remoteImages.at(0)}
 			link={$path("/media/groups/item/:id", { id: props.metadataGroupId })}
 		/>
 	);

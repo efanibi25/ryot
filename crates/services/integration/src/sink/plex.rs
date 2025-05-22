@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use common_models::StringIdObject;
 use dependent_models::{ImportCompletedItem, ImportResult};
 use enum_models::{MediaLot, MediaSource};
@@ -89,32 +89,29 @@ fn calculate_progress(payload: &models::PlexWebhookPayload) -> Result<Decimal> {
     }
 }
 
-pub async fn yank_progress(
+pub async fn sink_progress(
     payload: String,
     db: &DatabaseConnection,
     plex_user: Option<String>,
-) -> Result<ImportResult> {
+) -> Result<Option<ImportResult>> {
     let payload = parse_payload(&payload)?;
 
     if let Some(plex_user) = &plex_user {
         if *plex_user != payload.account.plex_user {
-            bail!(
-                "Ignoring non matching user {:#?}",
-                payload.account.plex_user
-            );
+            return Ok(None);
         }
     }
 
     match payload.event_type.as_str() {
         "media.scrobble" | "media.play" | "media.pause" | "media.resume" | "media.stop" => {}
-        _ => bail!("Ignoring event type {:#?}", payload.event_type),
+        _ => return Ok(None),
     };
 
     let identifier = get_tmdb_identifier(&payload.metadata.guids)?;
     let (identifier, lot) = get_media_info(db, &payload.metadata, identifier).await?;
     let progress = calculate_progress(&payload)?;
 
-    Ok(ImportResult {
+    Ok(Some(ImportResult {
         completed: vec![ImportCompletedItem::Metadata(ImportOrExportMetadataItem {
             lot,
             identifier,
@@ -129,5 +126,5 @@ pub async fn yank_progress(
             ..Default::default()
         })],
         ..Default::default()
-    })
+    }))
 }

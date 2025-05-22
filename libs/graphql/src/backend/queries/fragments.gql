@@ -59,13 +59,6 @@ fragment SeenPart on Seen {
 	}
 }
 
-fragment MetadataSearchItemPart on MetadataSearchItem {
-	title
-	image
-	identifier
-	publishYear
-}
-
 fragment WorkoutOrExerciseTotalsPart on WorkoutOrExerciseTotals {
 	reps
 	weight
@@ -76,8 +69,13 @@ fragment WorkoutOrExerciseTotalsPart on WorkoutOrExerciseTotals {
 }
 
 fragment EntityAssetsPart on EntityAssets {
-	images
-	videos
+	s3Images
+	s3Videos
+	remoteImages
+	remoteVideos {
+		url
+		source
+	}
 }
 
 fragment WorkoutSetStatisticPart on WorkoutSetStatistic {
@@ -106,6 +104,7 @@ fragment WorkoutSummaryPart on WorkoutSummary {
 		id
 		lot
 		numSets
+		unitSystem
 		bestSet {
 			...WorkoutSetRecordPart
 		}
@@ -191,6 +190,7 @@ fragment WorkoutInformationPart on WorkoutInformation {
 		id
 		lot
 		notes
+		unitSystem
 		total {
 			...WorkoutOrExerciseTotalsPart
 		}
@@ -225,4 +225,42 @@ fragment PersonDetailsGroupedByRolePart on PersonDetailsGroupedByRole {
 		entityId
 		character
 	}
+}
+
+fragment DailyUserActivityItemPart on DailyUserActivityItem {
+	day
+	totalCount
+	totalDuration
+	totalBookPages
+	totalReviewCount
+	totalMetadataCount
+	totalShowDuration
+	totalMovieDuration
+	totalMusicDuration
+	totalWorkoutReps
+	totalWorkoutWeight
+	totalWorkoutDistance
+	totalWorkoutRestTime
+	totalWorkoutDuration
+	totalPodcastDuration
+	totalVideoGameDuration
+	totalAudioBookDuration
+	totalVisualNovelDuration
+	totalPersonReviewCount
+	totalMetadataReviewCount
+	totalWorkoutPersonalBests
+	totalCollectionReviewCount
+	totalMetadataGroupReviewCount
+	userMeasurementCount
+	bookCount
+	showCount
+	movieCount
+	musicCount
+	animeCount
+	mangaCount
+	workoutCount
+	podcastCount
+	audioBookCount
+	videoGameCount
+	visualNovelCount
 }

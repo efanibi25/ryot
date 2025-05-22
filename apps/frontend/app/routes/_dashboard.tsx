@@ -20,8 +20,8 @@ import {
 	List,
 	Loader,
 	Modal,
+	MultiSelect,
 	NumberInput,
-	Paper,
 	Rating,
 	ScrollArea,
 	SegmentedControl,
@@ -29,6 +29,7 @@ import {
 	SimpleGrid,
 	Slider,
 	Stack,
+	Switch,
 	Text,
 	TextInput,
 	Textarea,
@@ -37,27 +38,25 @@ import {
 	Tooltip,
 	UnstyledButton,
 	rem,
-	useDirection,
 	useMantineTheme,
 } from "@mantine/core";
 import { DateInput, DatePickerInput, DateTimePicker } from "@mantine/dates";
-import {
-	upperFirst,
-	useCounter,
-	useDisclosure,
-	useLocalStorage,
-} from "@mantine/hooks";
+import { upperFirst, useDisclosure, useListState } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
 import {
 	CollectionExtraInformationLot,
+	CreateUserMeasurementDocument,
 	EntityLot,
 	MediaLot,
 	type MetadataDetailsQuery,
 	type UserCollectionsListQuery,
 	UserLot,
+	type UserMeasurementInput,
 	type UserMetadataDetailsQuery,
 	UserReviewScale,
 	Visibility,
 } from "@ryot/generated/graphql/backend/graphql";
+import { AddEntityToCollectionDocument } from "@ryot/generated/graphql/backend/graphql";
 import {
 	changeCase,
 	formatDateToNaiveDate,
@@ -70,8 +69,6 @@ import {
 	IconBook,
 	IconBrandPagekit,
 	IconCalendar,
-	IconCancel,
-	IconChevronLeft,
 	IconChevronRight,
 	IconChevronsLeft,
 	IconChevronsRight,
@@ -91,10 +88,12 @@ import {
 	IconStretching,
 	IconSun,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
+import clsx from "clsx";
 import { produce } from "immer";
 import Cookies from "js-cookie";
 import { type FC, type FormEvent, type ReactNode, useState } from "react";
+import Joyride from "react-joyride";
 import {
 	Form,
 	Link,
@@ -112,16 +111,19 @@ import { ClientOnly } from "remix-utils/client-only";
 import { $path } from "safe-routes";
 import { match } from "ts-pattern";
 import { joinURL, withQuery } from "ufo";
+import { MultiSelectCreatable } from "~/components/common";
 import {
 	FitnessAction,
 	LOGO_IMAGE_URL,
 	ThreePointSmileyRating,
 	Verb,
+	clientGqlService,
 	convertDecimalToThreePointSmiley,
-	getMetadataDetailsQuery,
+	dayjsLib,
+	forcedDashboardPath,
 	getVerb,
-	refreshUserMetadataDetails,
-} from "~/lib/generals";
+	refreshEntityDetails,
+} from "~/lib/common";
 import {
 	useApplicationEvents,
 	useConfirmSubmit,
@@ -134,11 +136,15 @@ import {
 	useUserMetadataDetails,
 	useUserPreferences,
 } from "~/lib/hooks";
-import { useBulkEditCollection } from "~/lib/state/collection";
 import { useMeasurementsDrawerOpen } from "~/lib/state/fitness";
 import {
+	OnboardingTourStepTargets,
+	useOnboardingTour,
+	useOpenedSidebarLinks,
+} from "~/lib/state/general";
+import {
 	type UpdateProgressData,
-	useAddEntityToCollection,
+	useAddEntityToCollections,
 	useMetadataProgressUpdate,
 	useReviewEntity,
 } from "~/lib/state/media";
@@ -146,6 +152,7 @@ import {
 	getCookieValue,
 	getCoreDetails,
 	getDecodedJwt,
+	getEnhancedCookieName,
 	getUserCollectionsList,
 	getUserPreferences,
 	redirectIfNotAuthenticatedOrUpdated,
@@ -169,78 +176,16 @@ export const loader = async ({ request }: Route.LoaderArgs) => {
 		desktopSidebarCollapsedCookie,
 	);
 
-	const mediaLinks = [
-		...userPreferences.featuresEnabled.media.specific.map((f) => {
-			return { label: f, href: undefined };
-		}),
-		userPreferences.featuresEnabled.media.groups
-			? {
-					label: "Groups",
-					href: $path("/media/groups/:action", { action: "list" }),
-				}
-			: undefined,
-		userPreferences.featuresEnabled.media.people
-			? {
-					label: "People",
-					href: $path("/media/people/:action", { action: "list" }),
-				}
-			: undefined,
-		userPreferences.featuresEnabled.media.genres
-			? {
-					label: "Genres",
-					href: $path("/media/genre/list"),
-				}
-			: undefined,
-	]
-		.map((link, _index) =>
-			link
-				? {
-						label: changeCase(link.label),
-						link: link.href
-							? link.href
-							: $path("/media/:action/:lot", {
-									action: "list",
-									lot: link.label,
-								}),
-					}
-				: undefined,
-		)
-		.filter((link) => link !== undefined);
-
-	const fitnessLinks = [
-		...(Object.entries(userPreferences.featuresEnabled.fitness || {})
-			.filter(([v, _]) => !["enabled"].includes(v))
-			.map(([name, enabled]) => ({ name, enabled }))
-			?.filter((f) => f.enabled)
-			.map((f) => ({
-				label: changeCase(f.name.toString()),
-				href: joinURL("/fitness", f.name, "list"),
-			})) || []),
-		{ label: "Exercises", href: $path("/fitness/exercises/list") },
-	]
-		.filter((link) => link !== undefined)
-		.map((link) => ({ label: link.label, link: link.href }));
-
-	const settingsLinks = [
-		{ label: "Preferences", link: $path("/settings/preferences") },
-		{
-			label: "Imports and Exports",
-			link: $path("/settings/imports-and-exports"),
-		},
-		{
-			label: "Profile and Sharing",
-			link: $path("/settings/profile-and-sharing"),
-		},
-		{ label: "Integrations", link: $path("/settings/integrations") },
-		{ label: "Notifications", link: $path("/settings/notifications") },
-		{ label: "Miscellaneous", link: $path("/settings/miscellaneous") },
-		userDetails.lot === UserLot.Admin
-			? { label: "Users", link: $path("/settings/users") }
-			: undefined,
-	].filter((link) => link !== undefined);
-
 	const currentColorScheme = await colorSchemeCookie.parse(
 		request.headers.get("cookie") || "",
+	);
+	const onboardingTourCompletedCookie = await getEnhancedCookieName({
+		name: "OnboardingCompleted",
+		request,
+	});
+	const isOnboardingTourCompleted = getCookieValue(
+		request,
+		onboardingTourCompletedCookie,
 	);
 
 	const decodedCookie = getDecodedJwt(request);
@@ -254,11 +199,8 @@ export const loader = async ({ request }: Route.LoaderArgs) => {
 		!isDemoInstance;
 
 	return {
-		mediaLinks,
 		userDetails,
 		coreDetails,
-		fitnessLinks,
-		settingsLinks,
 		isDemoInstance,
 		userPreferences,
 		shouldHaveUmami,
@@ -266,6 +208,8 @@ export const loader = async ({ request }: Route.LoaderArgs) => {
 		currentColorScheme,
 		isAccessLinkSession,
 		desktopSidebarCollapsed,
+		isOnboardingTourCompleted,
+		onboardingTourCompletedCookie,
 	};
 };
 
@@ -348,71 +292,141 @@ export function ErrorBoundary() {
 
 export default function Layout() {
 	const loaderData = useLoaderData<typeof loader>();
+	const userPreferences = useUserPreferences();
 	const userDetails = useUserDetails();
 	const [parent] = useAutoAnimate();
 	const { revalidate } = useRevalidator();
 	const submit = useConfirmSubmit();
 	const isFitnessActionActive = useIsFitnessActionActive();
-	const [openedLinkGroups, setOpenedLinkGroups] = useLocalStorage<
-		| {
-				media: boolean;
-				fitness: boolean;
-				settings: boolean;
-				collection: boolean;
-		  }
-		| undefined
-	>({
-		key: "SavedOpenedLinkGroups",
-		defaultValue: {
-			fitness: false,
-			media: false,
-			settings: false,
-			collection: false,
-		},
-		getInitialValueInEffect: true,
-	});
+	const { openedSidebarLinks, setOpenedSidebarLinks } = useOpenedSidebarLinks();
 	const [mobileNavbarOpened, { toggle: toggleMobileNavbar }] =
 		useDisclosure(false);
 	const theme = useMantineTheme();
 	const navigate = useNavigate();
 	const location = useLocation();
-	const Icon = loaderData.currentColorScheme === "dark" ? IconSun : IconMoon;
 	const [metadataToUpdate, setMetadataToUpdate] = useMetadataProgressUpdate();
 	const closeMetadataProgressUpdateModal = () => setMetadataToUpdate(null);
 	const [entityToReview, setEntityToReview] = useReviewEntity();
 	const closeReviewEntityModal = () => setEntityToReview(null);
-	const [addEntityToCollectionData, setAddEntityToCollectionData] =
-		useAddEntityToCollection();
-	const closeAddEntityToCollectionModal = () =>
-		setAddEntityToCollectionData(null);
+	const [addEntityToCollectionsData, setAddEntityToCollectionsData] =
+		useAddEntityToCollections();
+	const closeAddEntityToCollectionsDrawer = () =>
+		setAddEntityToCollectionsData(null);
 	const [measurementsDrawerOpen, setMeasurementsDrawerOpen] =
 		useMeasurementsDrawerOpen();
 	const closeMeasurementsDrawer = () => setMeasurementsDrawerOpen(false);
-	const bulkEditingCollection = useBulkEditCollection();
-	const bulkEditingCollectionState = bulkEditingCollection.state;
-	const shouldShowBulkEditingAffix =
-		bulkEditingCollectionState &&
-		(bulkEditingCollectionState.data.action === "remove"
-			? location.pathname ===
-				$path("/collections/:id", {
-					id: bulkEditingCollectionState.data.collection.id,
-				})
-			: [
-					...Object.values(MediaLot).map((ml) =>
-						$path("/media/:action/:lot", { action: "list", lot: ml }),
-					),
-					$path("/media/people/:action", { action: "list" }),
-					$path("/media/groups/:action", { action: "list" }),
-				].includes(location.pathname));
+	const {
+		onboardingTourSteps,
+		completeOnboardingTour,
+		isOnboardingTourInProgress,
+		isOnLastOnboardingTourStep,
+		currentOnboardingTourStepIndex,
+	} = useOnboardingTour();
+
+	const mediaLinks = [
+		...userPreferences.featuresEnabled.media.specific.map((f) => {
+			return {
+				label: changeCase(f),
+				link: $path("/media/:action/:lot", { action: "list", lot: f }),
+				tourControlTarget:
+					isOnboardingTourInProgress && f === MediaLot.Movie
+						? `${OnboardingTourStepTargets.FirstSidebar} ${OnboardingTourStepTargets.GoBackToMoviesSection}`
+						: undefined,
+			};
+		}),
+		userPreferences.featuresEnabled.media.groups
+			? {
+					label: "Groups",
+					link: $path("/media/groups/:action", { action: "list" }),
+				}
+			: undefined,
+		userPreferences.featuresEnabled.media.people
+			? {
+					label: "People",
+					link: $path("/media/people/:action", { action: "list" }),
+				}
+			: undefined,
+		userPreferences.featuresEnabled.media.genres
+			? {
+					label: "Genres",
+					link: $path("/media/genre/list"),
+				}
+			: undefined,
+	].filter((link) => link !== undefined);
+	const Icon = loaderData.currentColorScheme === "dark" ? IconSun : IconMoon;
+	const fitnessLinks = [
+		...(Object.entries(userPreferences.featuresEnabled.fitness || {})
+			.filter(([v, _]) => !["enabled"].includes(v))
+			.map(([name, enabled]) => ({ name, enabled }))
+			?.filter((f) => f.enabled)
+			.map((f) => ({
+				label: changeCase(f.name.toString()),
+				link: joinURL("/fitness", f.name, "list"),
+				tourControlTarget:
+					isOnboardingTourInProgress && f.name === "workouts"
+						? OnboardingTourStepTargets.OpenWorkoutsSection
+						: f.name === "templates"
+							? OnboardingTourStepTargets.ClickOnTemplatesSidebarSection
+							: f.name === "measurements"
+								? OnboardingTourStepTargets.ClickOnMeasurementSidebarSection
+								: undefined,
+			})) || []),
+		{ label: "Exercises", link: $path("/fitness/exercises/list") },
+	].filter((link) => link !== undefined);
+	const settingsLinks = [
+		{
+			label: "Preferences",
+			link: $path("/settings/preferences"),
+			tourControlTarget: OnboardingTourStepTargets.OpenSettingsPreferences,
+		},
+		{
+			label: "Imports and Exports",
+			link: $path("/settings/imports-and-exports"),
+		},
+		{
+			label: "Profile and Sharing",
+			link: $path("/settings/profile-and-sharing"),
+		},
+		{ label: "Integrations", link: $path("/settings/integrations") },
+		{ label: "Notifications", link: $path("/settings/notifications") },
+		{ label: "Miscellaneous", link: $path("/settings/miscellaneous") },
+		userDetails.lot === UserLot.Admin
+			? { label: "Users", link: $path("/settings/users") }
+			: undefined,
+	].filter((link) => link !== undefined);
 
 	return (
 		<>
+			<ClientOnly>
+				{() => {
+					if (!isOnboardingTourInProgress) return null;
+					return (
+						<Joyride
+							hideBackButton
+							hideCloseButton
+							spotlightClicks
+							disableScrolling
+							disableCloseOnEsc
+							disableOverlayClose
+							spotlightPadding={0}
+							steps={onboardingTourSteps}
+							run={isOnboardingTourInProgress}
+							stepIndex={currentOnboardingTourStepIndex}
+							styles={{
+								overlay: { zIndex: 120 },
+								tooltipContent: { padding: 0 },
+							}}
+						/>
+					);
+				}}
+			</ClientOnly>
 			{isFitnessActionActive &&
 			!Object.values(FitnessAction)
 				.map((action) => $path("/fitness/:action", { action }))
 				.includes(location.pathname) ? (
 				<Tooltip label="You have an active workout" position="left">
 					<Affix
+						style={{ transition: "all 0.3s" }}
 						position={{
 							bottom: rem(40),
 							right: rem(
@@ -422,13 +436,12 @@ export default function Layout() {
 									: 40,
 							),
 						}}
-						style={{ transition: "all 0.3s" }}
 					>
 						<ActionIcon
-							variant="filled"
-							color="orange"
-							radius="xl"
 							size="xl"
+							radius="xl"
+							color="orange"
+							variant="filled"
 							onClick={() =>
 								navigate(
 									$path("/fitness/:action", {
@@ -442,127 +455,65 @@ export default function Layout() {
 					</Affix>
 				</Tooltip>
 			) : null}
-			{shouldShowBulkEditingAffix ? (
-				<Affix position={{ bottom: rem(30) }} w="100%" px="sm">
-					<Form
-						method="POST"
-						onSubmit={(e) => {
-							submit(e);
-							bulkEditingCollectionState.stop(true);
-						}}
-						action={$path("/actions", { intent: "bulkCollectionAction" })}
-					>
-						<input
-							type="hidden"
-							name="action"
-							defaultValue={bulkEditingCollectionState.data.action}
-						/>
-						<input
-							type="hidden"
-							name="collectionName"
-							defaultValue={bulkEditingCollectionState.data.collection.name}
-						/>
-						<input
-							type="hidden"
-							name="creatorUserId"
-							defaultValue={
-								bulkEditingCollectionState.data.collection.creatorUserId
-							}
-						/>
-						{bulkEditingCollectionState.data.entities.map((item, index) => (
-							<Fragment key={JSON.stringify(item)}>
-								<input
-									readOnly
-									type="hidden"
-									value={item.entityId}
-									name={`items[${index}].entityId`}
-								/>
-								<input
-									readOnly
-									type="hidden"
-									value={item.entityLot}
-									name={`items[${index}].entityLot`}
-								/>
-							</Fragment>
-						))}
-						<Paper withBorder shadow="xl" p="md" w={{ md: "40%" }} mx="auto">
-							<Group wrap="nowrap" justify="space-between">
-								<Text fz={{ base: "xs", md: "md" }}>
-									{bulkEditingCollectionState.data.entities.length} items
-									selected
-								</Text>
-								<Group wrap="nowrap">
-									<ActionIcon
-										size="md"
-										onClick={() => bulkEditingCollectionState.stop()}
-									>
-										<IconCancel />
-									</ActionIcon>
-									<Button
-										size="xs"
-										color="blue"
-										loading={bulkEditingCollectionState.data.isLoading}
-										onClick={() => bulkEditingCollectionState.bulkAdd()}
-									>
-										Select all items
-									</Button>
-									<Button
-										size="xs"
-										color={
-											bulkEditingCollectionState.data.action === "remove"
-												? "red"
-												: "green"
-										}
-										type="submit"
-										disabled={
-											bulkEditingCollectionState.data.entities.length === 0
-										}
-									>
-										{changeCase(bulkEditingCollectionState.data.action)}
-									</Button>
-								</Group>
-							</Group>
-						</Paper>
-					</Form>
-				</Affix>
-			) : null}
 			<Modal
-				onClose={closeMetadataProgressUpdateModal}
-				opened={metadataToUpdate !== null}
-				withCloseButton={false}
 				centered
+				withCloseButton={false}
+				opened={metadataToUpdate !== null}
+				onClose={closeMetadataProgressUpdateModal}
 			>
 				<MetadataProgressUpdateForm
 					closeMetadataProgressUpdateModal={closeMetadataProgressUpdateModal}
 				/>
 			</Modal>
 			<Modal
-				onClose={() => setEntityToReview(null)}
-				opened={entityToReview !== null}
-				withCloseButton={false}
 				centered
+				withCloseButton={false}
+				onClose={completeOnboardingTour}
+				opened={isOnLastOnboardingTourStep}
+				title="You've completed the onboarding tour!"
+			>
+				<Stack>
+					<Text>
+						These are just the basics to get you up and running. Ryot has a lot
+						more to offer and I encourage you to explore the app and see what it
+						can do for you.
+					</Text>
+					<Text size="sm" c="dimmed">
+						You can restart the tour at any time from the profile settings.
+					</Text>
+					<Button variant="outline" onClick={completeOnboardingTour}>
+						Start using Ryot!
+					</Button>
+				</Stack>
+			</Modal>
+			<Modal
+				centered
+				withCloseButton={false}
+				opened={entityToReview !== null}
+				onClose={() => setEntityToReview(null)}
+				title={`Reviewing "${entityToReview?.entityTitle}"`}
 			>
 				<ReviewEntityForm closeReviewEntityModal={closeReviewEntityModal} />
 			</Modal>
-			<Modal
-				onClose={closeAddEntityToCollectionModal}
-				opened={addEntityToCollectionData !== null}
-				withCloseButton={false}
-				centered
-			>
-				<AddEntityToCollectionForm
-					closeAddEntityToCollectionModal={closeAddEntityToCollectionModal}
-				/>
-			</Modal>
 			<Drawer
-				onClose={closeMeasurementsDrawer}
-				opened={measurementsDrawerOpen}
+				withCloseButton={false}
+				onClose={closeAddEntityToCollectionsDrawer}
+				opened={addEntityToCollectionsData !== null}
+			>
+				<AddEntityToCollectionsForm
+					closeAddEntityToCollectionsModal={closeAddEntityToCollectionsDrawer}
+				/>
+			</Drawer>
+			<Drawer
 				title="Add new measurement"
+				opened={measurementsDrawerOpen}
+				onClose={closeMeasurementsDrawer}
 			>
 				<CreateMeasurementForm
 					closeMeasurementModal={closeMeasurementsDrawer}
 				/>
 			</Drawer>
+
 			<AppShell
 				w="100%"
 				padding={0}
@@ -603,23 +554,24 @@ export default function Layout() {
 					</Flex>
 					<Box component={ScrollArea} style={{ flexGrow: 1 }}>
 						<LinksGroup
-							label="Dashboard"
-							icon={IconHome2}
-							href={$path("/")}
 							opened={false}
-							toggle={toggleMobileNavbar}
+							icon={IconHome2}
+							label="Dashboard"
 							setOpened={() => {}}
+							href={forcedDashboardPath}
+							toggle={toggleMobileNavbar}
 						/>
 						{loaderData.userPreferences.featuresEnabled.media.enabled ? (
 							<LinksGroup
 								label="Media"
+								links={mediaLinks}
 								icon={IconDeviceSpeaker}
-								links={loaderData.mediaLinks}
-								opened={openedLinkGroups?.media || false}
 								toggle={toggleMobileNavbar}
+								opened={openedSidebarLinks.media || false}
+								tourControlTarget={OnboardingTourStepTargets.Welcome}
 								setOpened={(k) =>
-									setOpenedLinkGroups(
-										produce(openedLinkGroups, (draft) => {
+									setOpenedSidebarLinks(
+										produce(openedSidebarLinks, (draft) => {
 											if (draft) draft.media = k;
 										}),
 									)
@@ -629,17 +581,18 @@ export default function Layout() {
 						{loaderData.userPreferences.featuresEnabled.fitness.enabled ? (
 							<LinksGroup
 								label="Fitness"
+								links={fitnessLinks}
 								icon={IconStretching}
-								opened={openedLinkGroups?.fitness || false}
 								toggle={toggleMobileNavbar}
+								opened={openedSidebarLinks.fitness || false}
+								tourControlTarget={OnboardingTourStepTargets.OpenFitnessSidebar}
 								setOpened={(k) =>
-									setOpenedLinkGroups(
-										produce(openedLinkGroups, (draft) => {
+									setOpenedSidebarLinks(
+										produce(openedSidebarLinks, (draft) => {
 											if (draft) draft.fitness = k;
 										}),
 									)
 								}
-								links={loaderData.fitnessLinks}
 							/>
 						) : null}
 						{loaderData.userPreferences.featuresEnabled.analytics.enabled ? (
@@ -650,26 +603,32 @@ export default function Layout() {
 								setOpened={() => {}}
 								toggle={toggleMobileNavbar}
 								href={$path("/analytics")}
+								tourControlTarget={
+									OnboardingTourStepTargets.ClickOnAnalyticsSidebarSection
+								}
 							/>
 						) : null}
 						{loaderData.userPreferences.featuresEnabled.others.calendar ? (
 							<LinksGroup
+								opened={false}
 								label="Calendar"
 								icon={IconCalendar}
-								href={$path("/calendar")}
-								opened={false}
-								toggle={toggleMobileNavbar}
 								setOpened={() => {}}
+								toggle={toggleMobileNavbar}
+								href={$path("/calendar")}
 							/>
 						) : null}
 						{loaderData.userPreferences.featuresEnabled.others.collections ? (
 							<LinksGroup
-								label="Collections"
-								icon={IconArchive}
-								href={$path("/collections/list")}
 								opened={false}
-								toggle={toggleMobileNavbar}
+								icon={IconArchive}
+								label="Collections"
 								setOpened={() => {}}
+								toggle={toggleMobileNavbar}
+								href={$path("/collections/list")}
+								tourControlTarget={
+									OnboardingTourStepTargets.ClickOnCollectionsSidebarSection
+								}
 							/>
 						) : null}
 						{loaderData.isAccessLinkSession &&
@@ -677,16 +636,19 @@ export default function Layout() {
 							<LinksGroup
 								label="Settings"
 								icon={IconSettings}
-								opened={openedLinkGroups?.settings || false}
+								links={settingsLinks}
 								toggle={toggleMobileNavbar}
+								opened={openedSidebarLinks.settings || false}
+								tourControlTarget={
+									OnboardingTourStepTargets.OpenSettingsSidebar
+								}
 								setOpened={(k) =>
-									setOpenedLinkGroups(
-										produce(openedLinkGroups, (draft) => {
+									setOpenedSidebarLinks(
+										produce(openedSidebarLinks, (draft) => {
 											if (draft) draft.settings = k;
 										}),
 									)
 								}
-								links={loaderData.settingsLinks}
 							/>
 						)}
 					</Box>
@@ -712,14 +674,14 @@ export default function Layout() {
 						) : null}
 						<Form
 							method="POST"
-							action={withQuery("/actions", { intent: "toggleColorScheme" })}
 							onSubmit={submit}
+							action={withQuery("/actions", { intent: "toggleColorScheme" })}
 						>
 							<Group justify="center">
 								<UnstyledButton
+									type="submit"
 									aria-label="Toggle theme"
 									className={classes.control2}
-									type="submit"
 								>
 									<Center className={classes.iconWrapper}>
 										<Icon size={16.8} stroke={1.5} />
@@ -742,8 +704,8 @@ export default function Layout() {
 						>
 							<UnstyledButton
 								mx="auto"
-								className={classes.oldLink}
 								type="submit"
+								className={classes.oldLink}
 							>
 								<Group>
 									<IconLogout size={19.2} />
@@ -755,7 +717,7 @@ export default function Layout() {
 				</AppShell.Navbar>
 				<Flex direction="column" h="90%">
 					<Flex justify="space-between" p="md" hiddenFrom="sm">
-						<Link to={$path("/")} style={{ all: "unset" }}>
+						<Link to={forcedDashboardPath} style={{ all: "unset" }}>
 							<Group>
 								<Image
 									h={40}
@@ -820,30 +782,25 @@ interface LinksGroupProps {
 	label: string;
 	href?: string;
 	opened: boolean;
-	setOpened: (v: boolean) => void;
 	toggle: () => void;
-	links?: Array<{ label: string; link: string }>;
+	tourControlTarget?: string;
+	setOpened: (v: boolean) => void;
+	links?: Array<{ label: string; link: string; tourControlTarget?: string }>;
 }
 
-const LinksGroup = ({
-	icon: Icon,
-	label,
-	href,
-	setOpened,
-	toggle,
-	opened,
-	links,
-}: LinksGroupProps) => {
-	const { dir } = useDirection();
-	const hasLinks = Array.isArray(links);
-	const ChevronIcon = dir === "ltr" ? IconChevronRight : IconChevronLeft;
-	const allLinks = (hasLinks ? links || [] : []).filter((s) => s !== undefined);
-	const items = allLinks.map((link) => (
+const LinksGroup = (props: LinksGroupProps) => {
+	const { advanceOnboardingTourStep } = useOnboardingTour();
+
+	const hasLinks = Array.isArray(props.links);
+	const linkItems = (hasLinks ? props.links || [] : []).map((link) => (
 		<NavLink
-			className={classes.link}
 			to={link.link}
 			key={link.label}
-			onClick={toggle}
+			className={clsx(classes.link, link.tourControlTarget)}
+			onClick={() => {
+				props.toggle();
+				advanceOnboardingTourStep();
+			}}
 		>
 			{({ isActive }) => (
 				<span style={isActive ? { textDecoration: "underline" } : undefined}>
@@ -854,35 +811,37 @@ const LinksGroup = ({
 	));
 
 	return (
-		<>
+		<Box>
 			<UnstyledButton<typeof Link>
 				component={!hasLinks ? Link : undefined}
 				// biome-ignore lint/suspicious/noExplicitAny: required here
-				to={!hasLinks ? href : (undefined as any)}
+				to={!hasLinks ? props.href : (undefined as any)}
+				className={clsx(classes.control, props.tourControlTarget)}
 				onClick={() => {
-					if (hasLinks) setOpened(!opened);
-					else toggle();
+					advanceOnboardingTourStep();
+					if (hasLinks) {
+						props.setOpened(!props.opened);
+						return;
+					}
+					props.toggle();
 				}}
-				className={classes.control}
 			>
 				<Group justify="space-between" gap={0}>
 					<Box style={{ display: "flex", alignItems: "center" }}>
 						<ThemeIcon variant="light" size={30}>
-							<Icon size={17.6} />
+							<props.icon size={17.6} />
 						</ThemeIcon>
-						<Box ml="md">{label}</Box>
+						<Box ml="md">{props.label}</Box>
 					</Box>
 					{hasLinks ? (
 						<ClientOnly>
 							{() => (
-								<ChevronIcon
-									className={classes.chevron}
+								<IconChevronRight
 									size={16}
 									stroke={1.5}
+									className={classes.chevron}
 									style={{
-										transform: opened
-											? `rotate(${dir === "rtl" ? -90 : 90}deg)`
-											: "none",
+										transform: props.opened ? "rotate(90deg)" : "none",
 									}}
 								/>
 							)}
@@ -890,8 +849,8 @@ const LinksGroup = ({
 					) : null}
 				</Group>
 			</UnstyledButton>
-			{hasLinks ? <Collapse in={opened}>{items}</Collapse> : null}
-		</>
+			{hasLinks ? <Collapse in={props.opened}>{linkItems}</Collapse> : null}
+		</Box>
 	);
 };
 
@@ -958,7 +917,7 @@ const MetadataProgressUpdateForm = ({
 		submit(e);
 		const metadataId = metadataToUpdate.metadataId;
 		events.updateProgress(metadataDetails.title);
-		refreshUserMetadataDetails(metadataId);
+		refreshEntityDetails(metadataId);
 		closeMetadataProgressUpdateModal();
 	};
 
@@ -1041,13 +1000,13 @@ const MetadataInProgressUpdateForm = ({
 			<Stack mt="sm">
 				<Group>
 					<Slider
-						max={100}
 						min={0}
 						step={1}
-						showLabelOnHover={false}
+						max={100}
 						value={value}
 						onChange={setValue}
 						style={{ flexGrow: 1 }}
+						showLabelOnHover={false}
 					/>
 					<NumberInput
 						w="20%"
@@ -1109,14 +1068,16 @@ const MetadataNewProgressUpdateForm = ({
 }) => {
 	const [parent] = useAutoAnimate();
 	const [_, setMetadataToUpdate] = useMetadataProgressUpdate();
-	const [selectedDate, setSelectedDate] = useState<Date | null | undefined>(
-		new Date(),
+	const [selectedDate, setSelectedDate] = useState<string | null | undefined>(
+		formatDateToNaiveDate(new Date()),
 	);
 	const [watchTime, setWatchTime] = useState<WatchTimes>(
 		WatchTimes.JustCompletedNow,
 	);
-	const lastProviderWatchedOn = history[0]?.providerWatchedOn;
 	const watchProviders = useGetWatchProviders(metadataDetails.lot);
+	const { advanceOnboardingTourStep } = useOnboardingTour();
+
+	const lastProviderWatchedOn = history[0]?.providerWatchedOn;
 
 	return (
 		<Form
@@ -1135,9 +1096,7 @@ const MetadataNewProgressUpdateForm = ({
 					? ["metadataLot", metadataDetails.lot]
 					: undefined,
 				watchTime === WatchTimes.JustStartedIt ? ["progress", "0"] : undefined,
-				selectedDate
-					? ["date", formatDateToNaiveDate(selectedDate)]
-					: undefined,
+				selectedDate ? ["date", selectedDate] : undefined,
 			]
 				.filter((v) => typeof v !== "undefined")
 				.map(([k, v]) => (
@@ -1151,9 +1110,9 @@ const MetadataNewProgressUpdateForm = ({
 				{metadataDetails.lot === MediaLot.Anime ? (
 					<>
 						<NumberInput
-							label="Episode"
 							required
 							hideControls
+							label="Episode"
 							value={metadataToUpdate.animeEpisodeNumber?.toString()}
 							onChange={(e) => {
 								setMetadataToUpdate(
@@ -1164,8 +1123,8 @@ const MetadataNewProgressUpdateForm = ({
 							}}
 						/>
 						<Checkbox
-							label="Mark all unseen episodes before this as watched"
 							name="animeAllEpisodesBefore"
+							label="Mark all unseen episodes before this as watched"
 						/>
 					</>
 				) : null}
@@ -1177,8 +1136,8 @@ const MetadataNewProgressUpdateForm = ({
 						>
 							<Group wrap="nowrap">
 								<NumberInput
-									description="Chapter"
 									hideControls
+									description="Chapter"
 									value={metadataToUpdate.mangaChapterNumber?.toString()}
 									onChange={(e) => {
 										setMetadataToUpdate(
@@ -1193,8 +1152,8 @@ const MetadataNewProgressUpdateForm = ({
 									OR
 								</Text>
 								<NumberInput
-									description="Volume"
 									hideControls
+									description="Volume"
 									value={metadataToUpdate.mangaVolumeNumber?.toString()}
 									onChange={(e) => {
 										setMetadataToUpdate(
@@ -1208,21 +1167,23 @@ const MetadataNewProgressUpdateForm = ({
 							</Group>
 						</Input.Wrapper>
 						<Checkbox
-							label="Mark all unread volumes/chapters before this as watched"
 							name="mangaAllChaptersOrVolumesBefore"
+							label="Mark all unread volumes/chapters before this as watched"
 						/>
 					</>
 				) : null}
 				{metadataDetails.lot === MediaLot.Show ? (
 					<>
 						<Select
-							label="Season"
 							required
+							searchable
+							limit={50}
+							label="Season"
+							value={metadataToUpdate.showSeasonNumber?.toString()}
 							data={metadataDetails.showSpecifics?.seasons.map((s) => ({
 								label: `${s.seasonNumber}. ${s.name.toString()}`,
 								value: s.seasonNumber.toString(),
 							}))}
-							value={metadataToUpdate.showSeasonNumber?.toString()}
 							onChange={(v) => {
 								setMetadataToUpdate(
 									produce(metadataToUpdate, (draft) => {
@@ -1230,12 +1191,20 @@ const MetadataNewProgressUpdateForm = ({
 									}),
 								);
 							}}
-							searchable
-							limit={50}
 						/>
 						<Select
-							label="Episode"
+							searchable
+							limit={50}
 							required
+							label="Episode"
+							value={metadataToUpdate.showEpisodeNumber?.toString()}
+							onChange={(v) => {
+								setMetadataToUpdate(
+									produce(metadataToUpdate, (draft) => {
+										draft.showEpisodeNumber = Number(v);
+									}),
+								);
+							}}
 							data={
 								metadataDetails.showSpecifics?.seasons
 									.find(
@@ -1246,16 +1215,6 @@ const MetadataNewProgressUpdateForm = ({
 										value: e.episodeNumber.toString(),
 									})) || []
 							}
-							value={metadataToUpdate.showEpisodeNumber?.toString()}
-							onChange={(v) => {
-								setMetadataToUpdate(
-									produce(metadataToUpdate, (draft) => {
-										draft.showEpisodeNumber = Number(v);
-									}),
-								);
-							}}
-							searchable
-							limit={50}
 						/>
 						<Checkbox
 							label="Mark all unseen episodes before this as seen"
@@ -1275,12 +1234,14 @@ const MetadataNewProgressUpdateForm = ({
 						<Text fw="bold">Select episode</Text>
 						<Select
 							required
+							searchable
+							limit={50}
 							label="Episode"
+							value={metadataToUpdate.podcastEpisodeNumber?.toString()}
 							data={metadataDetails.podcastSpecifics?.episodes.map((se) => ({
 								label: se.title.toString(),
 								value: se.number.toString(),
 							}))}
-							value={metadataToUpdate.podcastEpisodeNumber?.toString()}
 							onChange={(v) => {
 								setMetadataToUpdate(
 									produce(metadataToUpdate, (draft) => {
@@ -1288,8 +1249,6 @@ const MetadataNewProgressUpdateForm = ({
 									}),
 								);
 							}}
-							searchable
-							limit={50}
 						/>
 						<Checkbox
 							label="Mark all unseen episodes before this as seen"
@@ -1314,7 +1273,7 @@ const MetadataNewProgressUpdateForm = ({
 						setWatchTime(v as typeof watchTime);
 						match(v)
 							.with(WatchTimes.JustCompletedNow, () =>
-								setSelectedDate(new Date()),
+								setSelectedDate(formatDateToNaiveDate(new Date())),
 							)
 							.with(
 								WatchTimes.IDontRemember,
@@ -1331,8 +1290,8 @@ const MetadataNewProgressUpdateForm = ({
 						clearable
 						dropdownType="modal"
 						maxDate={new Date()}
-						onChange={setSelectedDate}
 						label="Enter exact date"
+						onChange={setSelectedDate}
 					/>
 				) : null}
 				{watchTime !== WatchTimes.JustStartedIt ? (
@@ -1347,6 +1306,8 @@ const MetadataNewProgressUpdateForm = ({
 					type="submit"
 					variant="outline"
 					disabled={selectedDate === undefined}
+					onClick={() => advanceOnboardingTourStep()}
+					className={OnboardingTourStepTargets.AddMovieToWatchedHistory}
 				>
 					Submit
 				</Button>
@@ -1391,10 +1352,10 @@ const ReviewEntityForm = ({
 	>(
 		entityToReview?.existingReview?.podcastExtraInformation?.episode?.toString(),
 	);
-	const { data: metadataDetails } = useQuery({
-		...getMetadataDetailsQuery(entityToReview?.entityId),
-		enabled: entityToReview?.entityLot === EntityLot.Metadata,
-	});
+	const { data: metadataDetails } = useMetadataDetails(
+		entityToReview?.entityId,
+		entityToReview?.entityLot === EntityLot.Metadata,
+	);
 
 	const SmileySurround = (props: {
 		children: ReactNode;
@@ -1422,7 +1383,7 @@ const ReviewEntityForm = ({
 			action={withQuery("/actions", { intent: "performReviewAction" })}
 			onSubmit={(e) => {
 				submit(e);
-				refreshUserMetadataDetails(entityToReview.entityId);
+				refreshEntityDetails(entityToReview.entityId);
 				events.postReview(entityToReview.entityTitle);
 				closeReviewEntityModal();
 			}}
@@ -1478,6 +1439,28 @@ const ReviewEntityForm = ({
 								name="rating"
 								label="Rating"
 								rightSection={<IconPercentage size={16} />}
+								defaultValue={
+									entityToReview.existingReview?.rating
+										? Number(entityToReview.existingReview.rating)
+										: undefined
+								}
+							/>
+						))
+						.with(UserReviewScale.OutOfTen, () => (
+							<NumberInput
+								w="40%"
+								min={0}
+								max={10}
+								step={0.1}
+								hideControls
+								name="rating"
+								label="Rating"
+								rightSectionWidth={rem(60)}
+								rightSection={
+									<Text size="xs" c="dimmed">
+										Out of 10
+									</Text>
+								}
 								defaultValue={
 									entityToReview.existingReview?.rating
 										? Number(entityToReview.existingReview.rating)
@@ -1644,22 +1627,21 @@ const ReviewEntityForm = ({
 type Collection =
 	UserCollectionsListQuery["userCollectionsList"]["response"][number];
 
-const AddEntityToCollectionForm = ({
-	closeAddEntityToCollectionModal,
+const AddEntityToCollectionsForm = ({
+	closeAddEntityToCollectionsModal,
 }: {
-	closeAddEntityToCollectionModal: () => void;
+	closeAddEntityToCollectionsModal: () => void;
 }) => {
 	const userDetails = useUserDetails();
 	const collections = useNonHiddenUserCollections();
 	const events = useApplicationEvents();
-	const submit = useConfirmSubmit();
-	const [selectedCollection, setSelectedCollection] =
-		useState<Collection | null>(null);
-	const [ownedOn, setOwnedOn] = useState<Date | null>();
-	const [addEntityToCollectionData, _] = useAddEntityToCollection();
-	const [numArrayElements, setNumArrayElements] = useCounter(1);
+	const revalidator = useRevalidator();
+	const [addEntityToCollectionData] = useAddEntityToCollections();
 
-	if (!addEntityToCollectionData) return null;
+	const [selectedCollections, selectedCollectionsHandlers] = useListState<
+		// biome-ignore lint/suspicious/noExplicitAny: required here
+		Collection & { userExtraInformationData: any }
+	>([]);
 
 	const selectData = Object.entries(
 		groupBy(collections, (c) =>
@@ -1670,179 +1652,222 @@ const AddEntityToCollectionForm = ({
 		items: items.map((c) => ({
 			label: c.name,
 			value: c.id.toString(),
-			disabled: addEntityToCollectionData.alreadyInCollections?.includes(
+			disabled: addEntityToCollectionData?.alreadyInCollections?.includes(
 				c.id.toString(),
 			),
 		})),
 	}));
 
+	const mutation = useMutation({
+		mutationFn: async () => {
+			if (!addEntityToCollectionData) return [];
+			const payload = selectedCollections.map((col) => ({
+				entityId: addEntityToCollectionData.entityId,
+				entityLot: addEntityToCollectionData.entityLot,
+				collectionName: col.name,
+				creatorUserId: col.creator.id,
+				information: col.userExtraInformationData,
+			}));
+			return Promise.all(
+				payload.map((item) =>
+					clientGqlService.request(AddEntityToCollectionDocument, {
+						input: item,
+					}),
+				),
+			);
+		},
+	});
+
+	if (!addEntityToCollectionData) return null;
+
+	const handleCollectionChange = (ids: string[]) => {
+		for (const id of ids) {
+			if (!selectedCollections.some((c) => c.id === id)) {
+				const col = collections.find((c) => c.id === id);
+				if (col)
+					selectedCollectionsHandlers.append({
+						...col,
+						userExtraInformationData: {},
+					});
+			}
+		}
+		for (let i = selectedCollections.length - 1; i >= 0; i--) {
+			if (!ids.includes(selectedCollections[i].id))
+				selectedCollectionsHandlers.remove(i);
+		}
+	};
+
+	const handleCustomFieldChange = (
+		colId: string,
+		field: string,
+		value: unknown,
+	) => {
+		const idx = selectedCollections.findIndex((c) => c.id === colId);
+		if (idx !== -1) {
+			selectedCollectionsHandlers.setItemProp(idx, "userExtraInformationData", {
+				...selectedCollections[idx].userExtraInformationData,
+				[field]: value,
+			});
+		}
+	};
+
+	const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
+		e.preventDefault();
+		await mutation.mutateAsync();
+		refreshEntityDetails(addEntityToCollectionData.entityId);
+		revalidator.revalidate();
+		closeAddEntityToCollectionsModal();
+		events.addToCollection(addEntityToCollectionData.entityLot);
+	};
+
 	return (
-		<Form
-			method="POST"
-			onSubmit={(e) => {
-				submit(e);
-				refreshUserMetadataDetails(addEntityToCollectionData.entityId);
-				closeAddEntityToCollectionModal();
-			}}
-			action={withQuery("/actions", { intent: "addEntityToCollection" })}
-		>
-			<input
-				hidden
-				readOnly
-				name="entityId"
-				value={addEntityToCollectionData.entityId}
-			/>
-			<input
-				hidden
-				readOnly
-				name="entityLot"
-				value={addEntityToCollectionData.entityLot}
-			/>
+		<Form onSubmit={handleSubmit}>
 			<Stack>
-				<Title order={3}>Select collection</Title>
-				<Select
+				<Title order={3}>Select collections</Title>
+				<MultiSelect
 					searchable
 					data={selectData}
 					nothingFoundMessage="Nothing found..."
-					value={selectedCollection?.id.toString()}
-					onChange={(v) => {
-						if (v) {
-							const collection = collections.find((c) => c.id === v);
-							if (collection) setSelectedCollection(collection);
-						}
-					}}
+					onChange={(v) => handleCollectionChange(v)}
+					value={selectedCollections.map((c) => c.id)}
 				/>
-				{selectedCollection ? (
-					<>
-						<input
-							hidden
-							readOnly
-							name="collectionName"
-							value={selectedCollection.name}
-						/>
-						<input
-							hidden
-							readOnly
-							name="creatorUserId"
-							value={selectedCollection.creator.id}
-						/>
+				{selectedCollections.map((selectedCollection) => (
+					<Fragment key={selectedCollection.id}>
 						{selectedCollection.informationTemplate?.map((template) => (
 							<Fragment key={template.name}>
 								{match(template.lot)
 									.with(CollectionExtraInformationLot.String, () => (
 										<TextInput
-											name={`information.${template.name}`}
 											label={template.name}
-											description={template.description}
 											required={!!template.required}
-											defaultValue={template.defaultValue || undefined}
+											description={template.description}
+											value={
+												selectedCollection.userExtraInformationData[
+													template.name
+												] || ""
+											}
+											onChange={(e) =>
+												handleCustomFieldChange(
+													selectedCollection.id,
+													template.name,
+													e.currentTarget.value,
+												)
+											}
+										/>
+									))
+									.with(CollectionExtraInformationLot.Boolean, () => (
+										<Switch
+											label={template.name}
+											required={!!template.required}
+											description={template.description}
+											checked={
+												selectedCollection.userExtraInformationData[
+													template.name
+												] === "true"
+											}
+											onChange={(e) =>
+												handleCustomFieldChange(
+													selectedCollection.id,
+													template.name,
+													e.currentTarget.checked ? "true" : "false",
+												)
+											}
 										/>
 									))
 									.with(CollectionExtraInformationLot.Number, () => (
 										<NumberInput
-											name={`information.${template.name}`}
 											label={template.name}
-											description={template.description}
 											required={!!template.required}
-											defaultValue={
-												template.defaultValue
-													? Number(template.defaultValue)
-													: undefined
+											description={template.description}
+											value={
+												selectedCollection.userExtraInformationData[
+													template.name
+												] || ""
+											}
+											onChange={(v) =>
+												handleCustomFieldChange(
+													selectedCollection.id,
+													template.name,
+													v,
+												)
 											}
 										/>
 									))
 									.with(CollectionExtraInformationLot.Date, () => (
-										<>
-											<DateInput
-												label={template.name}
-												description={template.description}
-												required={!!template.required}
-												onChange={setOwnedOn}
-												value={ownedOn}
-												defaultValue={
-													template.defaultValue
-														? new Date(template.defaultValue)
-														: undefined
-												}
-											/>
-											{ownedOn ? (
-												<input
-													hidden
-													readOnly
-													name={`information.${template.name}`}
-													value={formatDateToNaiveDate(ownedOn)}
-												/>
-											) : null}
-										</>
+										<DateInput
+											label={template.name}
+											required={!!template.required}
+											description={template.description}
+											value={
+												selectedCollection.userExtraInformationData[
+													template.name
+												] || null
+											}
+											onChange={(v) =>
+												handleCustomFieldChange(
+													selectedCollection.id,
+													template.name,
+													v,
+												)
+											}
+										/>
 									))
 									.with(CollectionExtraInformationLot.DateTime, () => (
 										<DateTimePicker
-											name={`information.${template.name}`}
 											label={template.name}
-											description={template.description}
 											required={!!template.required}
+											description={template.description}
+											value={
+												selectedCollection.userExtraInformationData[
+													template.name
+												] || null
+											}
+											onChange={(v) =>
+												handleCustomFieldChange(
+													selectedCollection.id,
+													template.name,
+													dayjsLib(v).toISOString(),
+												)
+											}
 										/>
 									))
 									.with(CollectionExtraInformationLot.StringArray, () => (
-										<Input.Wrapper
+										<MultiSelectCreatable
 											label={template.name}
-											description={
-												<>
-													{template.description}
-													<Anchor
-														ml={4}
-														size="xs"
-														onClick={() => setNumArrayElements.increment()}
-													>
-														Add more
-													</Anchor>
-												</>
-											}
 											required={!!template.required}
-										>
-											<Stack gap="xs" mt={4}>
-												{Array.from({ length: numArrayElements }).map(
-													(_, i) => (
-														<Group key={i.toString()}>
-															<TextInput
-																name={`information.${template.name}[${i}]`}
-																flex={1}
-																defaultValue={
-																	template.defaultValue || undefined
-																}
-															/>
-															<Anchor
-																ml="auto"
-																size="xs"
-																onClick={() => setNumArrayElements.decrement()}
-															>
-																Remove
-															</Anchor>
-														</Group>
-													),
-												)}
-											</Stack>
-										</Input.Wrapper>
+											description={template.description}
+											data={template.possibleValues || []}
+											value={
+												selectedCollection.userExtraInformationData[
+													template.name
+												] || []
+											}
+											setValue={(newValue) =>
+												handleCustomFieldChange(
+													selectedCollection.id,
+													template.name,
+													newValue,
+												)
+											}
+										/>
 									))
 									.exhaustive()}
 							</Fragment>
 						))}
-					</>
-				) : null}
+					</Fragment>
+				))}
 				<Button
-					disabled={!selectedCollection}
-					variant="outline"
 					type="submit"
-					onClick={() =>
-						events.addToCollection(addEntityToCollectionData.entityLot)
-					}
+					variant="outline"
+					loading={mutation.isPending}
+					disabled={selectedCollections.length === 0 || mutation.isPending}
 				>
 					Set
 				</Button>
 				<Button
-					variant="outline"
 					color="red"
-					onClick={closeAddEntityToCollectionModal}
+					variant="outline"
+					onClick={closeAddEntityToCollectionsModal}
 				>
 					Cancel
 				</Button>
@@ -1854,56 +1879,116 @@ const AddEntityToCollectionForm = ({
 const CreateMeasurementForm = (props: {
 	closeMeasurementModal: () => void;
 }) => {
-	const userPreferences = useUserPreferences();
+	const revalidator = useRevalidator();
 	const events = useApplicationEvents();
-	const submit = useConfirmSubmit();
+	const userPreferences = useUserPreferences();
+
+	const [input, setInput] = useState<UserMeasurementInput>({
+		name: "",
+		comment: "",
+		timestamp: new Date().toISOString(),
+		information: {
+			statistics: [],
+			assets: {
+				s3Images: [],
+				s3Videos: [],
+				remoteVideos: [],
+				remoteImages: [],
+			},
+		},
+	});
+
+	const createMeasurementMutation = useMutation({
+		mutationFn: () =>
+			clientGqlService.request(CreateUserMeasurementDocument, { input }),
+	});
 
 	return (
-		<Form
-			replace
-			method="POST"
-			action={withQuery($path("/actions"), { intent: "createMeasurement" })}
-			onSubmit={(e) => {
-				submit(e);
-				events.createMeasurement();
-				props.closeMeasurementModal();
-			}}
-		>
-			<Stack>
-				<DateTimePicker
-					label="Timestamp"
-					defaultValue={new Date()}
-					name="timestamp"
-					required
-				/>
-				<TextInput label="Name" name="name" />
-				<SimpleGrid cols={2} style={{ alignItems: "end" }}>
-					{Object.keys(userPreferences.fitness.measurements.inbuilt)
-						.filter((n) => n !== "custom")
-						.filter(
-							(n) =>
-								// biome-ignore lint/suspicious/noExplicitAny: required
-								(userPreferences as any).fitness.measurements.inbuilt[n],
-						)
-						.map((v) => (
-							<NumberInput
-								decimalScale={3}
-								key={v}
-								label={changeCase(snakeCase(v))}
-								name={`stats.${v}`}
-							/>
-						))}
-					{userPreferences.fitness.measurements.custom.map(({ name }) => (
-						<NumberInput
-							key={name}
-							label={changeCase(snakeCase(name))}
-							name={`stats.custom.${name}`}
-						/>
-					))}
-				</SimpleGrid>
-				<Textarea label="Comment" name="comment" />
-				<Button type="submit">Submit</Button>
-			</Stack>
-		</Form>
+		<Stack>
+			<DateTimePicker
+				required
+				label="Timestamp"
+				value={new Date(input.timestamp)}
+				onChange={(v) =>
+					setInput(
+						produce(input, (draft) => {
+							draft.timestamp = v
+								? new Date(v).toISOString()
+								: new Date().toISOString();
+						}),
+					)
+				}
+			/>
+			<TextInput
+				label="Name"
+				value={input.name ?? ""}
+				onChange={(e) =>
+					setInput(
+						produce(input, (draft) => {
+							draft.name = e.target.value;
+						}),
+					)
+				}
+			/>
+			<SimpleGrid cols={2} style={{ alignItems: "end" }}>
+				{userPreferences.fitness.measurements.statistics.map(({ name }) => (
+					<NumberInput
+						key={name}
+						decimalScale={3}
+						label={changeCase(snakeCase(name))}
+						value={
+							input.information.statistics.find((s) => s.name === name)?.value
+						}
+						onChange={(v) => {
+							setInput(
+								produce(input, (draft) => {
+									const idx = draft.information.statistics.findIndex(
+										(s) => s.name === name,
+									);
+									if (idx !== -1) {
+										draft.information.statistics[idx].value = v.toString();
+									} else {
+										draft.information.statistics.push({
+											name,
+											value: v.toString(),
+										});
+									}
+								}),
+							);
+						}}
+					/>
+				))}
+			</SimpleGrid>
+			<Textarea
+				label="Comment"
+				value={input.comment ?? ""}
+				onChange={(e) =>
+					setInput(
+						produce(input, (draft) => {
+							draft.comment = e.target.value;
+						}),
+					)
+				}
+			/>
+			<Button
+				loading={createMeasurementMutation.isPending}
+				disabled={
+					createMeasurementMutation.isPending ||
+					!input.information.statistics.some((s) => s.value)
+				}
+				onClick={async () => {
+					events.createMeasurement();
+					await createMeasurementMutation.mutateAsync();
+					revalidator.revalidate();
+					notifications.show({
+						color: "green",
+						message: "Your measurement has been created",
+					});
+					props.closeMeasurementModal();
+				}}
+			>
+				Submit
+			</Button>
+		</Stack>
 	);
 };

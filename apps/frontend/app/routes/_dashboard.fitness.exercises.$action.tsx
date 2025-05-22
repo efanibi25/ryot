@@ -39,7 +39,7 @@ import invariant from "tiny-invariant";
 import { match } from "ts-pattern";
 import { withQuery } from "ufo";
 import { z } from "zod";
-import { getExerciseDetailsPath } from "~/lib/generals";
+import { getExerciseDetailsPath } from "~/lib/common";
 import { useCoreDetails } from "~/lib/hooks";
 import {
 	createS3FileUploader,
@@ -98,8 +98,13 @@ export const action = async ({ request }: Route.ActionArgs) => {
 		...newInput,
 		muscles,
 		attributes: {
-			images: submission.images || [],
 			instructions: instructions?.split("\n").map((s) => s.trim()) || [],
+			assets: {
+				s3Videos: [],
+				remoteImages: [],
+				remoteVideos: [],
+				s3Images: submission.images || [],
+			},
 		},
 	};
 	try {

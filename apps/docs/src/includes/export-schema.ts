@@ -67,42 +67,49 @@ export interface ImportOrExportExerciseItem {
 	reviews: ImportOrExportItemRating[];
 }
 
+export type EntityRemoteVideoSource = 'youtube' | 'dailymotion';
+
+/** The data that a remote video can have. */
+export interface EntityRemoteVideo {
+	/**
+	 * @default 'youtube'
+	 * @type {'youtube' | 'dailymotion'}
+	 */
+	source: EntityRemoteVideoSource;
+	url: string;
+}
+
+/** The assets related to an entity. */
+export interface EntityAssets {
+	/** The urls of the remote images. */
+	remote_images: string[];
+	/** The urls of the remote videos. */
+	remote_videos: EntityRemoteVideo[];
+	/** The keys of the S3 images. */
+	s3_images: string[];
+	/** The keys of the S3 videos. */
+	s3_videos: string[];
+}
+
+export interface UserMeasurementStatistic {
+	name: string;
+	value: string;
+}
+
 /** The actual statistics that were logged in a user measurement. */
-export interface UserMeasurementStats {
-	abdominal_skinfold: string | null;
-	basal_metabolic_rate: string | null;
-	biceps_circumference: string | null;
-	body_fat: string | null;
-	body_fat_caliper: string | null;
-	body_mass_index: string | null;
-	bone_mass: string | null;
-	calories: string | null;
-	chest_circumference: string | null;
-	chest_skinfold: string | null;
-	custom: Record<string, string> | null;
-	hip_circumference: string | null;
-	lean_body_mass: string | null;
-	muscle: string | null;
-	neck_circumference: string | null;
-	thigh_circumference: string | null;
-	thigh_skinfold: string | null;
-	total_body_water: string | null;
-	total_daily_energy_expenditure: string | null;
-	visceral_fat: string | null;
-	waist_circumference: string | null;
-	waist_to_height_ratio: string | null;
-	waist_to_hip_ratio: string | null;
-	weight: string | null;
+export interface UserMeasurementInformation {
+	assets: EntityAssets;
+	statistics: UserMeasurementStatistic[];
 }
 
 /** An export of a measurement taken at a point in time. */
 export interface UserMeasurement {
 	/** Any comment associated entered by the user. */
 	comment: string | null;
+	/** The contents of the actual measurement. */
+	information: UserMeasurementInformation;
 	/** The name given to this measurement by the user. */
 	name: string | null;
-	/** The contents of the actual measurement. */
-	stats: UserMeasurementStats;
 	/** The date and time this measurement was made. */
 	timestamp: string;
 }
@@ -218,20 +225,6 @@ export interface ImportOrExportPersonItem {
 	source_specifics: PersonSourceSpecifics | null;
 }
 
-/** The assets that were uploaded for an entity. */
-export interface EntityAssets {
-	/** The keys of the S3 images. */
-	images: string[];
-	/** The keys of the S3 videos. */
-	videos: string[];
-}
-
-/** Information about a workout done. */
-export interface WorkoutDuration {
-	from: string;
-	to: string | null;
-}
-
 /** The different types of exercises that can be done. */
 export type ExerciseLot = 'reps' | 'duration' | 'reps_and_weight' | 'reps_and_duration' | 'distance_and_duration' | 'reps_and_duration_and_distance';
 
@@ -285,6 +278,8 @@ export interface WorkoutOrExerciseTotals {
 	weight: string;
 }
 
+export type UserUnitSystem = 'metric' | 'imperial';
+
 /** An exercise that has been processed and committed to the database. */
 export interface ProcessedExercise {
 	assets: EntityAssets | null;
@@ -297,6 +292,11 @@ export interface ProcessedExercise {
 	notes: string[];
 	sets: WorkoutSetRecord[];
 	total: WorkoutOrExerciseTotals | null;
+	/**
+	 * @default 'metric'
+	 * @type {'metric' | 'imperial'}
+	 */
+	unit_system: UserUnitSystem;
 }
 
 export interface WorkoutSupersetsInformation {
@@ -310,7 +310,6 @@ export interface WorkoutSupersetsInformation {
 export interface WorkoutInformation {
 	assets: EntityAssets | null;
 	comment: string | null;
-	durations: WorkoutDuration[] | null;
 	exercises: ProcessedExercise[];
 	supersets: WorkoutSupersetsInformation[];
 }
@@ -322,6 +321,11 @@ export interface WorkoutSummaryExercise {
 	/** @default 'reps_and_weight' */
 	lot: ExerciseLot | null;
 	num_sets: number;
+	/**
+	 * @default 'metric'
+	 * @type {'metric' | 'imperial'}
+	 */
+	unit_system: UserUnitSystem;
 }
 
 export type ExerciseEquipment = 'bands' | 'cable' | 'other' | 'barbell' | 'machine' | 'body_only' | 'dumbbell' | 'foam_roll' | 'ez_curl_bar' | 'kettlebells' | 'exercise_ball' | 'medicine_ball';

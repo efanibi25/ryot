@@ -35,9 +35,9 @@ import {
 	PartialMetadataDisplay,
 	ToggleMediaMonitorMenuItem,
 } from "~/components/media";
-import { clientGqlService } from "~/lib/generals";
+import { clientGqlService } from "~/lib/common";
 import { useUserPreferences } from "~/lib/hooks";
-import { useAddEntityToCollection, useReviewEntity } from "~/lib/state/media";
+import { useAddEntityToCollections, useReviewEntity } from "~/lib/state/media";
 import { serverGqlService } from "~/lib/utilities.server";
 import type { Route } from "./+types/_dashboard.media.groups.item.$id._index";
 
@@ -84,13 +84,13 @@ export default function Page() {
 	const loaderData = useLoaderData<typeof loader>();
 	const userPreferences = useUserPreferences();
 	const [_r, setEntityToReview] = useReviewEntity();
-	const [_a, setAddEntityToCollectionData] = useAddEntityToCollection();
+	const [_a, setAddEntityToCollectionsData] = useAddEntityToCollections();
 
 	return (
 		<Container>
 			<MediaDetailsLayout
 				title={loaderData.metadataGroupDetails.details.title}
-				images={loaderData.metadataGroupDetails.details.displayImages}
+				assets={loaderData.metadataGroupDetails.details.assets}
 				externalLink={{
 					lot: loaderData.metadataGroupDetails.details.lot,
 					source: loaderData.metadataGroupDetails.details.source,
@@ -177,7 +177,7 @@ export default function Page() {
 								<Button
 									variant="outline"
 									onClick={() => {
-										setAddEntityToCollectionData({
+										setAddEntityToCollectionsData({
 											entityId: loaderData.metadataGroupId,
 											entityLot: EntityLot.MetadataGroup,
 											alreadyInCollections:

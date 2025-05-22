@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
 use async_graphql::{Enum, InputObject, SimpleObject};
-use common_models::{SearchInput, StoredUrl};
+use common_models::{EntityAssets, SearchInput};
 use derive_more::with_trait::{Add, AddAssign, Sum};
 use educe::Educe;
 use enum_models::{
@@ -10,7 +8,7 @@ use enum_models::{
 };
 use rust_decimal::Decimal;
 use schematic::{ConfigEnum, Schematic};
-use sea_orm::{prelude::DateTimeUtc, FromJsonQueryResult};
+use sea_orm::{FromJsonQueryResult, prelude::DateTimeUtc};
 use serde::{Deserialize, Serialize};
 use serde_with::skip_serializing_none;
 
@@ -43,12 +41,8 @@ pub enum ExerciseCategory {
 #[serde(rename_all = "camelCase")]
 #[graphql(input_name = "ExerciseAttributesInput")]
 pub struct ExerciseAttributes {
+    pub assets: EntityAssets,
     pub instructions: Vec<String>,
-    #[graphql(skip)]
-    #[serde(default)]
-    pub internal_images: Vec<StoredUrl>,
-    #[serde(default)]
-    pub images: Vec<String>,
 }
 
 #[derive(
@@ -76,49 +70,47 @@ pub struct GithubExercise {
     pub name: String,
 }
 
+#[skip_serializing_none]
+#[derive(
+    Eq,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Schematic,
+    Serialize,
+    InputObject,
+    Deserialize,
+    SimpleObject,
+    FromJsonQueryResult,
+)]
+#[graphql(input_name = "UserMeasurementStatisticInput")]
+#[serde(rename_all = "snake_case")]
+pub struct UserMeasurementStatistic {
+    pub name: String,
+    pub value: Decimal,
+}
+
 /// The actual statistics that were logged in a user measurement.
 #[skip_serializing_none]
 #[derive(
+    Eq,
     Debug,
     Clone,
-    Serialize,
-    Deserialize,
-    FromJsonQueryResult,
-    Eq,
-    PartialEq,
-    SimpleObject,
-    InputObject,
-    Schematic,
     Default,
+    PartialEq,
+    Schematic,
+    Serialize,
+    InputObject,
+    Deserialize,
+    SimpleObject,
+    FromJsonQueryResult,
 )]
-#[graphql(input_name = "UserMeasurementDataInput")]
+#[graphql(input_name = "UserMeasurementInformationInput")]
 #[serde(rename_all = "snake_case")]
-pub struct UserMeasurementStats {
-    pub weight: Option<Decimal>,
-    pub body_mass_index: Option<Decimal>,
-    pub total_body_water: Option<Decimal>,
-    pub muscle: Option<Decimal>,
-    pub lean_body_mass: Option<Decimal>,
-    pub body_fat: Option<Decimal>,
-    pub bone_mass: Option<Decimal>,
-    pub visceral_fat: Option<Decimal>,
-    pub waist_circumference: Option<Decimal>,
-    pub waist_to_height_ratio: Option<Decimal>,
-    pub hip_circumference: Option<Decimal>,
-    pub waist_to_hip_ratio: Option<Decimal>,
-    pub chest_circumference: Option<Decimal>,
-    pub thigh_circumference: Option<Decimal>,
-    pub biceps_circumference: Option<Decimal>,
-    pub neck_circumference: Option<Decimal>,
-    pub body_fat_caliper: Option<Decimal>,
-    pub chest_skinfold: Option<Decimal>,
-    pub abdominal_skinfold: Option<Decimal>,
-    pub thigh_skinfold: Option<Decimal>,
-    pub basal_metabolic_rate: Option<Decimal>,
-    pub total_daily_energy_expenditure: Option<Decimal>,
-    pub calories: Option<Decimal>,
-    // DEV: The only custom data type we allow is decimal
-    pub custom: Option<HashMap<String, Decimal>>,
+pub struct UserMeasurementInformation {
+    pub assets: EntityAssets,
+    pub statistics: Vec<UserMeasurementStatistic>,
 }
 
 /// The totals of a workout and the different bests achieved.
@@ -324,29 +316,6 @@ pub struct UserToExerciseExtraInformation {
     pub personal_bests: Vec<UserToExerciseBestSetExtraInformation>,
 }
 
-/// The assets that were uploaded for an entity.
-#[derive(
-    Eq,
-    Clone,
-    Debug,
-    Default,
-    Schematic,
-    PartialEq,
-    Serialize,
-    InputObject,
-    Deserialize,
-    SimpleObject,
-    FromJsonQueryResult,
-)]
-#[graphql(input_name = "EntityAssetsInput")]
-#[serde(rename_all = "snake_case")]
-pub struct EntityAssets {
-    /// The keys of the S3 images.
-    pub images: Vec<String>,
-    /// The keys of the S3 videos.
-    pub videos: Vec<String>,
-}
-
 /// An exercise that has been processed and committed to the database.
 #[skip_serializing_none]
 #[derive(
@@ -367,22 +336,23 @@ pub struct ProcessedExercise {
     pub lot: ExerciseLot,
     pub notes: Vec<String>,
     pub sets: Vec<WorkoutSetRecord>,
+    pub unit_system: UserUnitSystem,
     pub assets: Option<EntityAssets>,
     pub total: Option<WorkoutOrExerciseTotals>,
 }
 
 #[derive(
-    Debug,
-    Serialize,
-    Deserialize,
+    Eq,
+    Copy,
     Enum,
     Clone,
-    Eq,
-    PartialEq,
-    FromJsonQueryResult,
-    Copy,
+    Debug,
     Default,
+    PartialEq,
+    Serialize,
     ConfigEnum,
+    Deserialize,
+    FromJsonQueryResult,
 )]
 pub enum UserUnitSystem {
     #[default]
@@ -424,28 +394,6 @@ pub struct WorkoutSupersetsInformation {
     Schematic,
     Serialize,
     Deserialize,
-    InputObject,
-    SimpleObject,
-    FromJsonQueryResult,
-)]
-#[serde(rename_all = "snake_case")]
-#[graphql(input_name = "WorkoutDurationInput")]
-pub struct WorkoutDuration {
-    pub from: DateTimeUtc,
-    pub to: Option<DateTimeUtc>,
-}
-
-/// Information about a workout done.
-#[skip_serializing_none]
-#[derive(
-    Eq,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Schematic,
-    Serialize,
-    Deserialize,
     SimpleObject,
     FromJsonQueryResult,
 )]
@@ -454,7 +402,6 @@ pub struct WorkoutInformation {
     pub comment: Option<String>,
     pub assets: Option<EntityAssets>,
     pub exercises: Vec<ProcessedExercise>,
-    pub durations: Option<Vec<WorkoutDuration>>,
     pub supersets: Vec<WorkoutSupersetsInformation>,
 }
 
@@ -477,6 +424,7 @@ pub struct WorkoutSummaryExercise {
     pub id: String,
     pub num_sets: usize,
     pub lot: Option<ExerciseLot>,
+    pub unit_system: UserUnitSystem,
     pub best_set: Option<WorkoutSetRecord>,
 }
 
@@ -628,6 +576,7 @@ pub struct UserWorkoutSetRecord {
 pub struct UserExerciseInput {
     pub notes: Vec<String>,
     pub exercise_id: String,
+    pub unit_system: UserUnitSystem,
     pub assets: Option<EntityAssets>,
     pub sets: Vec<UserWorkoutSetRecord>,
 }
@@ -636,6 +585,7 @@ pub struct UserExerciseInput {
 pub struct UserWorkoutInput {
     pub name: String,
     pub end_time: DateTimeUtc,
+    pub duration: Option<i64>,
     pub comment: Option<String>,
     pub start_time: DateTimeUtc,
     pub template_id: Option<String>,
@@ -647,7 +597,6 @@ pub struct UserWorkoutInput {
     pub create_workout_id: Option<String>,
     pub exercises: Vec<UserExerciseInput>,
     pub update_workout_id: Option<String>,
-    pub durations: Option<Vec<WorkoutDuration>>,
     pub update_workout_template_id: Option<String>,
     pub supersets: Vec<WorkoutSupersetsInformation>,
 }

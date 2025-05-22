@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use apalis::prelude::*;
+use apalis_cron::CronContext;
 use background_models::{HpApplicationJob, LpApplicationJob, MpApplicationJob, ScheduledJob};
 use common_utils::ryot_log;
 use traits::TraceOk;
@@ -8,10 +9,11 @@ use traits::TraceOk;
 use crate::common::AppServices;
 
 pub async fn run_background_jobs(
-    information: ScheduledJob,
+    _information: ScheduledJob,
+    ctx: CronContext<chrono_tz::Tz>,
     app_services: Data<Arc<AppServices>>,
 ) -> Result<(), Error> {
-    ryot_log!(debug, "Running job at {:#?}", information.0);
+    ryot_log!(debug, "Running job at {:#?}", ctx.get_timestamp());
     app_services
         .miscellaneous_service
         .perform_background_jobs()
@@ -22,8 +24,10 @@ pub async fn run_background_jobs(
 
 pub async fn run_frequent_jobs(
     _information: ScheduledJob,
+    ctx: CronContext<chrono_tz::Tz>,
     app_services: Data<Arc<AppServices>>,
 ) -> Result<(), Error> {
+    ryot_log!(debug, "Running job at {:#?}", ctx.get_timestamp());
     app_services
         .integration_service
         .yank_integrations_data()
@@ -107,7 +111,7 @@ pub async fn perform_mp_application_job(
         MpApplicationJob::UpdateMetadataGroup(metadata_group_id) => {
             app_services
                 .miscellaneous_service
-                .update_metadata_group(&metadata_group_id)
+                .update_metadata_group_and_notify_users(metadata_group_id)
                 .await
         }
         MpApplicationJob::UpdateGithubExercises => {
@@ -159,6 +163,11 @@ pub async fn perform_lp_application_job(
         LpApplicationJob::HandleEntityAddedToCollectionEvent(collection_to_entity_id) => {
             app_services
                 .integration_service
+                .handle_entity_added_to_collection_event(collection_to_entity_id)
+                .await
+                .ok();
+            app_services
+                .collection_service
                 .handle_entity_added_to_collection_event(collection_to_entity_id)
                 .await
         }

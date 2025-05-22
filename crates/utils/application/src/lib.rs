@@ -1,22 +1,33 @@
 use std::{sync::Arc, time::Duration};
 
 use async_graphql::{Error, Result};
-use async_trait::async_trait;
 use axum::{
-    extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
     Extension, RequestPartsExt,
+    extract::FromRequestParts,
+    http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 use chrono::{NaiveDate, NaiveDateTime, Utc};
-use common_utils::USER_AGENT_STR;
-use file_storage_service::FileStorageService;
+use common_utils::{FRONTEND_OAUTH_ENDPOINT, USER_AGENT_STR, ryot_log};
 use media_models::{
-    GraphqlSortOrder, PodcastEpisode, PodcastSpecifics, ShowEpisode, ShowSeason, ShowSpecifics,
+    GraphqlSortOrder, PodcastEpisode, PodcastSpecifics, ReviewItem, ShowEpisode, ShowSeason,
+    ShowSpecifics,
+};
+use openidconnect::{
+    Client, ClientId, ClientSecret, EmptyAdditionalClaims, EndpointMaybeSet, EndpointNotSet,
+    EndpointSet, IssuerUrl, RedirectUrl, StandardErrorResponse,
+    core::{
+        CoreAuthDisplay, CoreAuthPrompt, CoreClient, CoreErrorResponseType, CoreGenderClaim,
+        CoreJsonWebKey, CoreJweContentEncryptionAlgorithm, CoreProviderMetadata,
+        CoreRevocableToken, CoreRevocationErrorResponse, CoreTokenIntrospectionResponse,
+        CoreTokenResponse,
+    },
+    reqwest,
 };
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT},
     ClientBuilder,
+    header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT},
 };
+use rust_decimal::Decimal;
 use sea_orm::Order;
 
 pub fn user_id_from_token(token: &str, jwt_secret: &str) -> Result<String> {
@@ -57,16 +68,6 @@ where
         }
         Ok(ctx)
     }
-}
-
-#[async_trait]
-pub trait GraphqlRepresentation {
-    async fn graphql_representation(
-        self,
-        file_storage_service: &FileStorageService,
-    ) -> Result<Self>
-    where
-        Self: Sized;
 }
 
 pub fn get_base_http_client(headers: Option<Vec<(HeaderName, HeaderValue)>>) -> reqwest::Client {
@@ -125,4 +126,80 @@ pub fn get_podcast_episode_number_by_name(val: &PodcastSpecifics, name: &str) ->
         .iter()
         .find(|e| e.title == name)
         .map(|e| e.number)
+}
+
+pub type ApplicationOidcClient<
+    HasAuthUrl = EndpointSet,
+    HasDeviceAuthUrl = EndpointNotSet,
+    HasIntrospectionUrl = EndpointNotSet,
+    HasRevocationUrl = EndpointNotSet,
+    HasTokenUrl = EndpointMaybeSet,
+    HasUserInfoUrl = EndpointMaybeSet,
+> = Client<
+    EmptyAdditionalClaims,
+    CoreAuthDisplay,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJsonWebKey,
+    CoreAuthPrompt,
+    StandardErrorResponse<CoreErrorResponseType>,
+    CoreTokenResponse,
+    CoreTokenIntrospectionResponse,
+    CoreRevocableToken,
+    CoreRevocationErrorResponse,
+    HasAuthUrl,
+    HasDeviceAuthUrl,
+    HasIntrospectionUrl,
+    HasRevocationUrl,
+    HasTokenUrl,
+    HasUserInfoUrl,
+>;
+
+pub async fn create_oidc_client(
+    config: &config::AppConfig,
+) -> Option<(reqwest::Client, ApplicationOidcClient)> {
+    match RedirectUrl::new(config.frontend.url.clone() + FRONTEND_OAUTH_ENDPOINT) {
+        Ok(redirect_url) => match IssuerUrl::new(config.server.oidc.issuer_url.clone()) {
+            Ok(issuer_url) => {
+                let async_http_client = reqwest::ClientBuilder::new()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap();
+                match CoreProviderMetadata::discover_async(issuer_url, &async_http_client).await {
+                    Ok(provider_metadata) => {
+                        let core_client = CoreClient::from_provider_metadata(
+                            provider_metadata,
+                            ClientId::new(config.server.oidc.client_id.clone()),
+                            Some(ClientSecret::new(config.server.oidc.client_secret.clone())),
+                        )
+                        .set_redirect_uri(redirect_url);
+                        Some((async_http_client, core_client))
+                    }
+                    Err(e) => {
+                        ryot_log!(debug, "Error while creating OIDC client: {:?}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                ryot_log!(debug, "Error while processing OIDC issuer url: {:?}", e);
+                None
+            }
+        },
+        Err(e) => {
+            ryot_log!(debug, "Error while processing OIDC redirect url: {:?}", e);
+            None
+        }
+    }
+}
+
+pub fn calculate_average_rating(reviews: &[ReviewItem]) -> Option<Decimal> {
+    let reviews_with_ratings = reviews.iter().filter_map(|r| r.rating).count();
+    match reviews_with_ratings {
+        0 => None,
+        _ => Some(
+            reviews.iter().filter_map(|r| r.rating).sum::<Decimal>()
+                / Decimal::from(reviews_with_ratings),
+        ),
+    }
 }

@@ -1,33 +1,36 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use application_utils::get_base_http_client;
 use async_trait::async_trait;
 use chrono::Datelike;
-use common_models::{IdObject, NamedObject, PersonSourceSpecifics, SearchDetails, StoredUrl};
-use common_utils::{ryot_log, PAGE_SIZE};
+use common_models::{
+    EntityAssets, EntityRemoteVideo, EntityRemoteVideoSource, IdObject, NamedObject,
+    PersonSourceSpecifics, SearchDetails,
+};
+use common_utils::{PAGE_SIZE, ryot_log};
 use database_models::metadata_group::MetadataGroupWithoutId;
 use dependent_models::{
-    ApplicationCacheKey, ApplicationCacheValue, IgdbSettings, MetadataGroupSearchResponse,
-    MetadataPersonRelated, PeopleSearchResponse, PersonDetails, SearchResults,
+    ApplicationCacheKey, ApplicationCacheValue, IgdbSettings, MetadataPersonRelated, PersonDetails,
+    SearchResults,
 };
 use enum_models::{MediaLot, MediaSource};
 use itertools::Itertools;
 use media_models::{
-    CommitMediaInput, MetadataDetails, MetadataGroupSearchItem, MetadataImageForMediaDetails,
-    MetadataSearchItem, MetadataVideo, MetadataVideoSource, PartialMetadataPerson,
-    PartialMetadataWithoutId, PeopleSearchItem, UniqueMediaIdentifier, VideoGameSpecifics,
+    CommitMetadataGroupInput, MetadataDetails, MetadataGroupSearchItem, MetadataSearchItem,
+    PartialMetadataPerson, PartialMetadataWithoutId, PeopleSearchItem, UniqueMediaIdentifier,
+    VideoGameSpecifics,
 };
 use reqwest::{
-    header::{HeaderName, HeaderValue, AUTHORIZATION},
     Client,
+    header::{AUTHORIZATION, HeaderName, HeaderValue},
 };
 use rust_decimal::Decimal;
 use rust_iso3166::from_numeric;
 use sea_orm::prelude::DateTimeUtc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use serde_with::{formats::Flexible, serde_as, TimestampSeconds};
+use serde_json::{Value, json};
+use serde_with::{TimestampSeconds, formats::Flexible, serde_as};
 use supporting_service::SupportingService;
 use traits::MediaProvider;
 
@@ -180,7 +183,7 @@ impl MediaProvider for IgdbService {
         query: &str,
         page: Option<i32>,
         _display_nsfw: bool,
-    ) -> Result<MetadataGroupSearchResponse> {
+    ) -> Result<SearchResults<MetadataGroupSearchItem>> {
         let client = self.get_client_config().await?;
         let req_body = format!(
             r#"
@@ -281,9 +284,9 @@ where id = {id};
         &self,
         query: &str,
         page: Option<i32>,
-        _source_specifics: &Option<PersonSourceSpecifics>,
         _display_nsfw: bool,
-    ) -> Result<PeopleSearchResponse> {
+        _source_specifics: &Option<PersonSourceSpecifics>,
+    ) -> Result<SearchResults<PeopleSearchItem>> {
         let client = self.get_client_config().await?;
         let req_body = format!(
             r#"
@@ -393,9 +396,12 @@ where id = {id};
             description: detail.description,
             identifier: detail.id.to_string(),
             source_url: Some(format!("https://www.igdb.com/companies/{}", name)),
-            images: Some(Vec::from_iter(
-                detail.logo.map(|l| self.get_cover_image_url(l.image_id)),
-            )),
+            assets: EntityAssets {
+                remote_images: Vec::from_iter(
+                    detail.logo.map(|l| self.get_cover_image_url(l.image_id)),
+                ),
+                ..Default::default()
+            },
             place: detail
                 .country
                 .and_then(from_numeric)
@@ -427,13 +433,14 @@ where id = {id};
         let mut details: Vec<IgdbItemResponse> = rsp.json().await.map_err(|e| anyhow!(e))?;
         let detail = details.pop().ok_or_else(|| anyhow!("No details found"))?;
         let groups = match detail.collection.as_ref() {
-            Some(c) => vec![CommitMediaInput {
+            Some(c) => vec![CommitMetadataGroupInput {
                 name: "Loading...".to_string(),
                 unique: UniqueMediaIdentifier {
                     lot: MediaLot::VideoGame,
                     source: MediaSource::Igdb,
                     identifier: c.id.to_string(),
                 },
+                ..Default::default()
             }],
             None => vec![],
         };
@@ -488,10 +495,10 @@ offset: {offset};
             .map(|r| {
                 let a = self.igdb_response_to_search_response(r);
                 MetadataSearchItem {
-                    identifier: a.identifier,
                     title: a.title,
-                    image: a.url_images.first().map(|i| i.image.clone()),
+                    identifier: a.identifier,
                     publish_year: a.publish_year,
+                    image: a.assets.remote_images.first().cloned(),
                 }
             })
             .collect_vec();
@@ -560,17 +567,14 @@ impl IgdbService {
     }
 
     fn igdb_response_to_search_response(&self, item: IgdbItemResponse) -> MetadataDetails {
-        let mut images = Vec::from_iter(item.cover.map(|a| MetadataImageForMediaDetails {
-            image: self.get_cover_image_url(a.image_id),
-        }));
-        let additional_images =
-            item.artworks
-                .unwrap_or_default()
-                .into_iter()
-                .map(|a| MetadataImageForMediaDetails {
-                    image: self.get_cover_image_url(a.image_id),
-                });
+        let mut images = Vec::from_iter(item.cover.map(|a| self.get_cover_image_url(a.image_id)));
+        let additional_images = item
+            .artworks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| self.get_cover_image_url(a.image_id));
         images.extend(additional_images);
+
         let people = item
             .involved_companies
             .into_iter()
@@ -597,15 +601,17 @@ impl IgdbService {
             })
             .unique()
             .collect();
-        let videos = item
+
+        let remote_videos = item
             .videos
             .unwrap_or_default()
             .into_iter()
-            .map(|vid| MetadataVideo {
-                identifier: StoredUrl::Url(vid.video_id),
-                source: MetadataVideoSource::Youtube,
+            .map(|vid| EntityRemoteVideo {
+                url: vid.video_id,
+                source: EntityRemoteVideoSource::Youtube,
             })
             .collect_vec();
+
         let title = item.name.unwrap();
         MetadataDetails {
             title: title.clone(),
@@ -614,11 +620,14 @@ impl IgdbService {
             description: item.summary,
             identifier: item.id.to_string(),
             people,
-            url_images: images,
-            videos,
             publish_date: item.first_release_date.map(|d| d.date_naive()),
             publish_year: item.first_release_date.map(|d| d.year()),
             source_url: Some(format!("https://www.igdb.com/games/{}", title)),
+            assets: EntityAssets {
+                remote_videos,
+                remote_images: images,
+                ..Default::default()
+            },
             genres: item
                 .genres
                 .unwrap_or_default()

@@ -3,23 +3,23 @@
 You need to have S3 configured in order to export your data. You can find the necessary
 configuration parameters under the
 [`FileStorageConfig`](../configuration.md#all-parameters) section. The export will be made
-in JSON format and always follows the schema (`CompleteExport`) described below.
+in JSON format and always follows the schema (`CompleteExport`) described [below](#type-definitions).
 
 You can export your data from the app by going to the "Imports and Exports" settings page
 and then clicking the button under the "Export" tab. Once the export is complete, it will
 appear along with a button to download it.
 
-You can import it back using the [Generic JSON Importer](../importing.md#generic-json).
+You can import it back using the [Generic JSON Importer](../importing/generic-json.md).
 
 ## One time file storage
 
 If you want to use file storage only for exporting, you can configure it to use a public
 S3 instance offered by [Minio](https://play.min.io).
 
-!!! failure "Not for production use"
-
-    The Minio team resets this instance every 24 hours, hence this method is not suitable
-    if you want to store the data for a long time.
+::: danger Not for production use
+The Minio team resets this instance every 24 hours, hence this method is not suitable
+if you want to store the data for a long time.
+:::
 
 - Go to the [Minio playground](https://play.min.io). The login credentials are changed
   everyday and you can find them
@@ -54,6 +54,4 @@ docker exec -u postgres -i ryot-db pg_restore -U postgres -d postgres < /tmp/ryo
 
 ## Type definitions
 
-```ts
-{% include 'export-schema.ts' %}
-```
+<<< @/includes/export-schema.ts

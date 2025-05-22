@@ -1,6 +1,7 @@
 import { useAutoAnimate } from "@formkit/auto-animate/react";
 import {
 	ActionIcon,
+	Alert,
 	Anchor,
 	Avatar,
 	Badge,
@@ -29,6 +30,7 @@ import {
 import { changeCase, isNumber, startCase } from "@ryot/ts-utils";
 import {
 	IconArrowLeftToArc,
+	IconBellRinging,
 	IconClock,
 	IconInfoCircle,
 	type IconProps,
@@ -49,10 +51,11 @@ import {
 	dayjsLib,
 	getExerciseDetailsPath,
 	getSetColor,
-} from "~/lib/generals";
-import { useGetRandomMantineColor, useUserUnitSystem } from "~/lib/hooks";
+} from "~/lib/common";
+import { useGetRandomMantineColor, useUserDetails } from "~/lib/hooks";
 import {
 	getExerciseDetailsQuery,
+	getExerciseImages,
 	getUserExerciseDetailsQuery,
 	getWorkoutDetailsQuery,
 	getWorkoutTemplateDetailsQuery,
@@ -129,15 +132,15 @@ export const displayDistanceWithUnit = (
  **/
 export const DisplaySetStatistics = (props: {
 	lot: ExerciseLot;
-	statistic: WorkoutSetStatistic;
 	hideExtras?: boolean;
 	centerText?: boolean;
+	unitSystem: UserUnitSystem;
+	statistic: WorkoutSetStatistic;
 }) => {
-	const unitSystem = useUserUnitSystem();
 	const [first, second] = getSetStatisticsTextToDisplay(
 		props.lot,
 		props.statistic,
-		unitSystem,
+		props.unitSystem,
 	);
 
 	return (
@@ -169,6 +172,7 @@ export const DisplaySet = (props: {
 	set: Set;
 	idx: number;
 	exerciseLot: ExerciseLot;
+	unitSystem: UserUnitSystem;
 }) => {
 	const [opened, { close, open }] = useDisclosure(false);
 
@@ -214,6 +218,7 @@ export const DisplaySet = (props: {
 				) : null}
 				<DisplaySetStatistics
 					lot={props.exerciseLot}
+					unitSystem={props.unitSystem}
 					statistic={props.set.statistic}
 				/>
 			</Flex>
@@ -236,7 +241,6 @@ export const ExerciseHistory = (props: {
 	supersetInformation?: WorkoutSupersetsInformation[];
 }) => {
 	const theme = useMantineTheme();
-	const unitSystem = useUserUnitSystem();
 	const [opened, { toggle }] = useDisclosure(false);
 	const [parent] = useAutoAnimate();
 	const { data: workoutDetails } = useQuery(
@@ -258,6 +262,8 @@ export const ExerciseHistory = (props: {
 	const isInSuperset = props.supersetInformation?.find((s) =>
 		s.exercises.includes(props.exerciseIdx),
 	);
+
+	const images = getExerciseImages(exerciseDetails);
 
 	return (
 		<Paper
@@ -336,7 +342,7 @@ export const ExerciseHistory = (props: {
 												icon={IconWeight}
 												quantity={exercise.total.weight}
 												value={displayWeightWithUnit(
-													unitSystem,
+													exercise.unitSystem,
 													exercise.total.weight,
 												)}
 											/>
@@ -345,7 +351,7 @@ export const ExerciseHistory = (props: {
 												label="distance"
 												quantity={exercise.total.distance}
 												value={displayDistanceWithUnit(
-													unitSystem,
+													exercise.unitSystem,
 													exercise.total.distance,
 												)}
 											/>
@@ -361,7 +367,7 @@ export const ExerciseHistory = (props: {
 								{!props.hideExerciseDetails && exerciseDetails ? (
 									<ScrollArea type="scroll">
 										<Flex gap="lg">
-											{exerciseDetails.attributes.images.map((i) => (
+											{images.map((i) => (
 												<Image key={i} radius="md" src={i} h={200} w={350} />
 											))}
 										</Flex>
@@ -374,9 +380,9 @@ export const ExerciseHistory = (props: {
 								{exercise.notes.length === 1 ? undefined : `${idxN + 1})`} {n}
 							</Text>
 						))}
-						{exercise.assets && exercise.assets.images.length > 0 ? (
+						{exercise.assets && exercise.assets.s3Images.length > 0 ? (
 							<Avatar.Group>
-								{exercise.assets.images.map((i) => (
+								{exercise.assets.s3Images.map((i) => (
 									<Anchor key={i} href={i} target="_blank">
 										<Avatar src={i} />
 									</Anchor>
@@ -389,6 +395,7 @@ export const ExerciseHistory = (props: {
 							set={set}
 							idx={idx}
 							exerciseLot={exercise.lot}
+							unitSystem={exercise.unitSystem}
 							key={`${set.confirmedAt}-${idx}`}
 						/>
 					))}
@@ -432,13 +439,14 @@ export const ExerciseDisplayItem = (props: {
 		enabled: inViewport,
 	});
 	const times = userExerciseDetails?.details?.exerciseNumTimesInteracted;
+	const images = getExerciseImages(exerciseDetails);
 
 	return (
 		<BaseMediaDisplayItem
 			innerRef={ref}
+			imageUrl={images.at(0)}
 			name={exerciseDetails?.name}
 			isLoading={isExerciseDetailsLoading}
-			imageUrl={exerciseDetails?.attributes.images.at(0)}
 			onImageClickBehavior={getExerciseDetailsPath(props.exerciseId)}
 			labels={{
 				left: isNumber(times)
@@ -503,4 +511,15 @@ export const WorkoutTemplateDisplayItem = (props: {
 			}}
 		/>
 	);
+};
+
+export const WorkoutRevisionScheduledAlert = () => {
+	const userDetails = useUserDetails();
+
+	return userDetails.extraInformation?.scheduledForWorkoutRevision ? (
+		<Alert icon={<IconBellRinging />}>
+			A workout revision has been scheduled. Workout details might be outdated
+			until revision is complete.
+		</Alert>
+	) : null;
 };

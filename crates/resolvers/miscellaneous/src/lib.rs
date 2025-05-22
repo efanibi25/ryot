@@ -8,16 +8,15 @@ use common_models::{
 use dependent_models::{
     CachedResponse, CoreDetails, GenreDetails, GraphqlPersonDetails, MetadataGroupDetails,
     MetadataGroupSearchResponse, MetadataSearchResponse, PeopleSearchResponse, SearchResults,
-    UserMetadataDetails, UserMetadataGroupDetails, UserMetadataGroupsListInput,
-    UserMetadataGroupsListResponse, UserMetadataListInput, UserMetadataListResponse,
-    UserPeopleListInput, UserPeopleListResponse, UserPersonDetails,
+    TrendingMetadataIdsResponse, UserMetadataDetails, UserMetadataGroupDetails,
+    UserMetadataGroupsListInput, UserMetadataGroupsListResponse, UserMetadataListInput,
+    UserMetadataListResponse, UserPeopleListInput, UserPeopleListResponse, UserPersonDetails,
 };
 use media_models::{
-    CommitMediaInput, CommitPersonInput, CreateCustomMetadataInput, CreateOrUpdateReviewInput,
-    CreateReviewCommentInput, GenreDetailsInput, GraphqlCalendarEvent, GraphqlMetadataDetails,
-    GroupedCalendarEvent, MarkEntityAsPartialInput, MetadataPartialDetails, ProgressUpdateInput,
-    UpdateCustomMetadataInput, UpdateSeenItemInput, UserCalendarEventInput,
-    UserUpcomingCalendarEventInput,
+    CreateCustomMetadataInput, CreateOrUpdateReviewInput, CreateReviewCommentInput,
+    GenreDetailsInput, GraphqlCalendarEvent, GraphqlMetadataDetails, GroupedCalendarEvent,
+    MarkEntityAsPartialInput, ProgressUpdateInput, UpdateCustomMetadataInput, UpdateSeenItemInput,
+    UserCalendarEventInput, UserUpcomingCalendarEventInput,
 };
 use miscellaneous_service::MiscellaneousService;
 use traits::AuthProvider;
@@ -34,16 +33,6 @@ impl MiscellaneousQuery {
     async fn core_details(&self, gql_ctx: &Context<'_>) -> Result<CoreDetails> {
         let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
         service.core_details().await
-    }
-
-    /// Get partial details about a media present in the database.
-    async fn metadata_partial_details(
-        &self,
-        gql_ctx: &Context<'_>,
-        metadata_id: String,
-    ) -> Result<MetadataPartialDetails> {
-        let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
-        service.metadata_partial_details(&metadata_id).await
     }
 
     /// Get details about a media present in the database.
@@ -73,7 +62,8 @@ impl MiscellaneousQuery {
         input: GenreDetailsInput,
     ) -> Result<GenreDetails> {
         let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
-        service.genre_details(input).await
+        let user_id = self.user_id_from_ctx(gql_ctx).await?;
+        service.genre_details(user_id, input).await
     }
 
     /// Get details about a metadata group present in the database.
@@ -115,7 +105,8 @@ impl MiscellaneousQuery {
         input: SearchInput,
     ) -> Result<SearchResults<String>> {
         let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
-        service.genres_list(input).await
+        let user_id = self.user_id_from_ctx(gql_ctx).await?;
+        service.genres_list(user_id, input).await
     }
 
     /// Get paginated list of metadata groups.
@@ -217,6 +208,15 @@ impl MiscellaneousQuery {
         let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
         let user_id = self.user_id_from_ctx(gql_ctx).await?;
         service.metadata_group_search(&user_id, input).await
+    }
+
+    /// Get trending media items.
+    async fn trending_metadata(
+        &self,
+        gql_ctx: &Context<'_>,
+    ) -> Result<TrendingMetadataIdsResponse> {
+        let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
+        service.trending_metadata().await
     }
 }
 
@@ -354,36 +354,6 @@ impl MiscellaneousMutation {
         let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
         let user_id = self.user_id_from_ctx(gql_ctx).await?;
         service.disassociate_metadata(user_id, metadata_id).await
-    }
-
-    /// Fetch details about a media and create a media item in the database.
-    async fn commit_metadata(
-        &self,
-        gql_ctx: &Context<'_>,
-        input: CommitMediaInput,
-    ) -> Result<StringIdObject> {
-        let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
-        service.commit_metadata(input).await
-    }
-
-    /// Fetches details about a person and creates a person item in the database.
-    async fn commit_person(
-        &self,
-        gql_ctx: &Context<'_>,
-        input: CommitPersonInput,
-    ) -> Result<StringIdObject> {
-        let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
-        service.commit_person(input).await
-    }
-
-    /// Fetch details about a media group and create a media group item in the database.
-    async fn commit_metadata_group(
-        &self,
-        gql_ctx: &Context<'_>,
-        input: CommitMediaInput,
-    ) -> Result<StringIdObject> {
-        let service = gql_ctx.data_unchecked::<Arc<MiscellaneousService>>();
-        service.commit_metadata_group(input).await
     }
 
     /// Create, like or delete a comment on a review.

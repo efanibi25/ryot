@@ -37,12 +37,12 @@ import {
 	DeployUpdateMetadataJobDocument,
 	DisassociateMetadataDocument,
 	EntityLot,
+	EntityRemoteVideoSource,
 	MediaLot,
 	MediaSource,
 	MergeMetadataDocument,
 	MetadataDetailsDocument,
 	type MetadataDetailsQuery,
-	MetadataVideoSource,
 	type PodcastEpisode,
 	SeenState,
 	UpdateSeenItemDocument,
@@ -116,9 +116,9 @@ import {
 	dayjsLib,
 	getVerb,
 	openConfirmationModal,
-	refreshUserMetadataDetails,
+	refreshEntityDetails,
 	reviewYellow,
-} from "~/lib/generals";
+} from "~/lib/common";
 import {
 	useApplicationEvents,
 	useConfirmSubmit,
@@ -129,7 +129,11 @@ import {
 	useUserPreferences,
 } from "~/lib/hooks";
 import {
-	useAddEntityToCollection,
+	OnboardingTourStepTargets,
+	useOnboardingTour,
+} from "~/lib/state/general";
+import {
+	useAddEntityToCollections,
 	useMetadataProgressUpdate,
 	useReviewEntity,
 } from "~/lib/state/media";
@@ -282,13 +286,14 @@ export default function Page() {
 	] = useDisclosure(false);
 	const [_m, setMetadataToUpdate] = useMetadataProgressUpdate();
 	const [_r, setEntityToReview] = useReviewEntity();
-	const [_a, setAddEntityToCollectionData] = useAddEntityToCollection();
+	const [_a, setAddEntityToCollectionsData] = useAddEntityToCollections();
 	const [openedShowSeason, setOpenedShowSeason] = useState<number>();
+	const { advanceOnboardingTourStep } = useOnboardingTour();
 
 	const inProgress = loaderData.userMetadataDetails.inProgress;
 	const nextEntry = loaderData.userMetadataDetails.nextEntry;
 	const firstGroupAssociated = loaderData.metadataDetails.group.at(0);
-
+	const videos = [...loaderData.metadataDetails.assets.remoteVideos];
 	const additionalMetadataDetails = [
 		userPreferences.featuresEnabled.media.groups && firstGroupAssociated && (
 			<Link
@@ -364,7 +369,7 @@ export default function Page() {
 	const onSubmitProgressUpdate = (e: FormEvent<HTMLFormElement>) => {
 		submit(e);
 		events.updateProgress(loaderData.metadataDetails.title);
-		refreshUserMetadataDetails(loaderData.metadataId);
+		refreshEntityDetails(loaderData.metadataId);
 	};
 
 	const PutOnHoldMenuItem = () => {
@@ -417,7 +422,7 @@ export default function Page() {
 			<Container>
 				<MediaDetailsLayout
 					title={loaderData.metadataDetails.title}
-					images={loaderData.metadataDetails.assets.images}
+					assets={loaderData.metadataDetails.assets}
 					externalLink={{
 						lot: loaderData.metadataDetails.lot,
 						source: loaderData.metadataDetails.source,
@@ -529,8 +534,8 @@ export default function Page() {
 								? match(userPreferences.general.reviewScale)
 										.with(UserReviewScale.ThreePointSmiley, () => (
 											<DisplayThreePointReview
-												rating={loaderData.userMetadataDetails.averageRating}
 												size={40}
+												rating={loaderData.userMetadataDetails.averageRating}
 											/>
 										))
 										.otherwise(() => (
@@ -538,9 +543,9 @@ export default function Page() {
 												p={4}
 												display="flex"
 												style={{
-													flexDirection: "column",
-													alignItems: "center",
 													gap: 6,
+													alignItems: "center",
+													flexDirection: "column",
 												}}
 											>
 												<IconStarFilled
@@ -552,9 +557,13 @@ export default function Page() {
 														loaderData.userMetadataDetails.averageRating,
 													).toFixed(1)}
 													{userPreferences.general.reviewScale ===
-													UserReviewScale.OutOfFive
-														? undefined
-														: "%"}
+													UserReviewScale.OutOfHundred
+														? "%"
+														: undefined}
+													{userPreferences.general.reviewScale ===
+													UserReviewScale.OutOfTen
+														? "/10"
+														: undefined}
 												</Text>
 											</Paper>
 										))
@@ -583,7 +592,12 @@ export default function Page() {
 							>
 								Overview
 							</Tabs.Tab>
-							<Tabs.Tab value="actions" leftSection={<IconUser size={16} />}>
+							<Tabs.Tab
+								value="actions"
+								leftSection={<IconUser size={16} />}
+								onClick={() => advanceOnboardingTourStep()}
+								className={OnboardingTourStepTargets.MetadataDetailsActionsTab}
+							>
 								Actions
 							</Tabs.Tab>
 							<Tabs.Tab
@@ -622,8 +636,7 @@ export default function Page() {
 							>
 								Suggestions
 							</Tabs.Tab>
-							{!userPreferences.general.disableVideos &&
-							(loaderData.metadataDetails.assets.videos.length || 0) > 0 ? (
+							{!userPreferences.general.disableVideos && videos.length > 0 ? (
 								<Tabs.Tab value="videos" leftSection={<IconVideo size={16} />}>
 									Videos
 								</Tabs.Tab>
@@ -698,9 +711,9 @@ export default function Page() {
 														<Flex gap="md">
 															{c.items.map((creator) => (
 																<MetadataCreator
-																	id={creator.id}
 																	name={creator.name}
 																	image={creator.image}
+																	id={creator.id || undefined}
 																	character={creator.character}
 																	key={`${creator.id}-${creator.name}`}
 																/>
@@ -964,7 +977,7 @@ export default function Page() {
 									<Button
 										variant="outline"
 										onClick={() => {
-											setAddEntityToCollectionData({
+											setAddEntityToCollectionsData({
 												entityId: loaderData.metadataId,
 												entityLot: EntityLot.Metadata,
 												alreadyInCollections:
@@ -1156,10 +1169,10 @@ export default function Page() {
 							<Tabs.Panel value="videos">
 								<MediaScrollArea>
 									<Stack>
-										{loaderData.metadataDetails.assets.videos.map((v) => (
+										{videos.map((v) => (
 											<VideoIframe
-												key={v.videoId}
-												videoId={v.videoId}
+												key={v.url}
+												videoId={v.url}
 												videoSource={v.source}
 											/>
 										))}
@@ -1217,7 +1230,7 @@ export default function Page() {
 
 const VideoIframe = (props: {
 	videoId: string;
-	videoSource: MetadataVideoSource;
+	videoSource: EntityRemoteVideoSource;
 }) => {
 	const [isMounted, setIsMounted] = useState(false);
 	const { ref, inViewport } = useInViewport();
@@ -1235,14 +1248,13 @@ const VideoIframe = (props: {
 					src={
 						match(props.videoSource)
 							.with(
-								MetadataVideoSource.Youtube,
+								EntityRemoteVideoSource.Youtube,
 								() => "https://www.youtube.com/embed/",
 							)
 							.with(
-								MetadataVideoSource.Dailymotion,
+								EntityRemoteVideoSource.Dailymotion,
 								() => "https://www.dailymotion.com/embed/video/",
 							)
-							.with(MetadataVideoSource.Custom, () => "")
 							.exhaustive() + props.videoId
 					}
 					title="Video player"
@@ -1315,19 +1327,21 @@ const DisplayShowSeasonEpisodes = (props: {
 };
 
 const MetadataCreator = (props: {
+	id?: string;
 	name: string;
-	id?: string | null;
 	image?: string | null;
 	character?: string | null;
-}) => (
-	<BaseEntityDisplay
-		image={props.image || undefined}
-		title={`${props.name} ${props.character ? `as ${props.character}` : ""}`}
-		link={
-			props.id ? $path("/media/people/item/:id", { id: props.id }) : undefined
-		}
-	/>
-);
+}) => {
+	return (
+		<BaseEntityDisplay
+			image={props.image || undefined}
+			title={`${props.name} ${props.character ? `as ${props.character}` : ""}`}
+			link={
+				props.id ? $path("/media/people/item/:id", { id: props.id }) : undefined
+			}
+		/>
+	);
+};
 
 type History =
 	UserMetadataDetailsQuery["userMetadataDetails"]["history"][number];

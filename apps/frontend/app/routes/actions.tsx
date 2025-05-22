@@ -1,13 +1,8 @@
 import { setTimeout } from "node:timers/promises";
-import { parseFormData } from "@mjackson/form-data-parser";
 import {
 	AddEntityToCollectionDocument,
-	CommitMetadataDocument,
-	CommitMetadataGroupDocument,
-	CommitPersonDocument,
 	CreateOrUpdateReviewDocument,
 	CreateReviewCommentDocument,
-	CreateUserMeasurementDocument,
 	DeleteReviewDocument,
 	DeleteS3ObjectDocument,
 	DeployBulkProgressUpdateDocument,
@@ -15,7 +10,6 @@ import {
 	ExpireCacheKeyDocument,
 	MarkEntityAsPartialDocument,
 	MediaLot,
-	MediaSource,
 	MetadataDetailsDocument,
 	RemoveEntityFromCollectionDocument,
 	SeenState,
@@ -28,7 +22,6 @@ import {
 	isNumber,
 	omitBy,
 	processSubmission,
-	set,
 	zodBoolAsString,
 	zodCheckboxAsString,
 } from "@ryot/ts-utils";
@@ -37,12 +30,11 @@ import { $path } from "safe-routes";
 import invariant from "tiny-invariant";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { redirectToQueryParam } from "~/lib/generals";
+import { redirectToQueryParam } from "~/lib/common";
 import {
 	MetadataIdSchema,
 	MetadataSpecificsSchema,
 	colorSchemeCookie,
-	createS3FileUploader,
 	createToastHeaders,
 	extendResponseHeaders,
 	getLogoutCookies,
@@ -65,30 +57,6 @@ export const action = async ({ request }: Route.ActionArgs) => {
 	const headers = new Headers();
 	let status = undefined;
 	await match(intent)
-		.with("commitMedia", async () => {
-			const submission = processSubmission(formData, commitMediaSchema);
-			const { commitMetadata } = await serverGqlService.authenticatedRequest(
-				request,
-				CommitMetadataDocument,
-				{
-					input: {
-						name: submission.name,
-						unique: {
-							lot: submission.lot,
-							source: submission.source,
-							identifier: submission.identifier,
-						},
-					},
-				},
-			);
-			returnData = { commitMedia: commitMetadata };
-		})
-		.with("uploadWorkoutAsset", async () => {
-			const uploader = createS3FileUploader("workouts");
-			const formData = await parseFormData(request, uploader);
-			const fileKey = formData.get("file");
-			returnData = { key: fileKey };
-		})
 		.with("deleteS3Asset", async () => {
 			const key = formData.get("key") as string;
 			const { deleteS3Object } = await serverGqlService.authenticatedRequest(
@@ -97,45 +65,6 @@ export const action = async ({ request }: Route.ActionArgs) => {
 				{ key },
 			);
 			returnData = { success: deleteS3Object };
-		})
-		.with("commitPerson", async () => {
-			const submission = processSubmission(formData, commitPersonSchema);
-			const { commitPerson } = await serverGqlService.authenticatedRequest(
-				request,
-				CommitPersonDocument,
-				{
-					input: {
-						identifier: submission.identifier,
-						name: submission.name,
-						source: submission.source,
-						sourceSpecifics: {
-							isTmdbCompany: submission.isTmdbCompany,
-							isAnilistStudio: submission.isAnilistStudio,
-							isHardcoverPublisher: submission.isHardcoverPublisher,
-						},
-					},
-				},
-			);
-			returnData = { commitPerson };
-		})
-		.with("commitMetadataGroup", async () => {
-			const submission = processSubmission(formData, commitMediaSchema);
-			const { commitMetadataGroup } =
-				await serverGqlService.authenticatedRequest(
-					request,
-					CommitMetadataGroupDocument,
-					{
-						input: {
-							name: submission.name,
-							unique: {
-								lot: submission.lot,
-								source: submission.source,
-								identifier: submission.identifier,
-							},
-						},
-					},
-				);
-			returnData = { commitMetadataGroup };
 		})
 		.with("toggleColorScheme", async () => {
 			const currentColorScheme = await colorSchemeCookie.parse(
@@ -436,26 +365,6 @@ export const action = async ({ request }: Route.ActionArgs) => {
 				}),
 			);
 		})
-		.with("createMeasurement", async () => {
-			// biome-ignore lint/suspicious/noExplicitAny: the form values ensure that the submission is valid
-			const input: any = {};
-			for (const [name, value] of formData.entries()) {
-				if (!isEmpty(value) && name !== redirectToQueryParam)
-					set(input, name, value);
-			}
-			await serverGqlService.authenticatedRequest(
-				request,
-				CreateUserMeasurementDocument,
-				{ input },
-			);
-			extendResponseHeaders(
-				headers,
-				await createToastHeaders({
-					type: "success",
-					message: "Measurement submitted successfully",
-				}),
-			);
-		})
 		.with("bulkCollectionAction", async () => {
 			const submission = processSubmission(formData, bulkCollectionAction);
 			for (const item of submission.items) {
@@ -502,22 +411,6 @@ export const action = async ({ request }: Route.ActionArgs) => {
 	}
 	return Response.json(returnData, { headers, status });
 };
-
-const commitMediaSchema = z.object({
-	name: z.string(),
-	identifier: z.string(),
-	lot: z.nativeEnum(MediaLot),
-	source: z.nativeEnum(MediaSource),
-});
-
-const commitPersonSchema = z.object({
-	name: z.string(),
-	identifier: z.string(),
-	source: z.nativeEnum(MediaSource),
-	isTmdbCompany: zodBoolAsString.optional(),
-	isAnilistStudio: zodBoolAsString.optional(),
-	isHardcoverPublisher: zodBoolAsString.optional(),
-});
 
 const reviewCommentSchema = z.object({
 	reviewId: z.string(),

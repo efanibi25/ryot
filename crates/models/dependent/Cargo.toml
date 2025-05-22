@@ -1,7 +1,7 @@
 [package]
 name = "dependent-models"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 async-graphql = { workspace = true }
@@ -9,7 +9,7 @@ chrono = { workspace = true }
 common-models = { path = "../common" }
 config = { path = "../../config" }
 database-models = { path = "../database" }
-enum-models = { path = "../../models/enum" }
+enum-models = { path = "../enum" }
 importer-models = { path = "../importer" }
 media-models = { path = "../media" }
 fitness-models = { path = "../fitness" }

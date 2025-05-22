@@ -50,7 +50,6 @@ import {
 	IconWeight,
 	IconZzz,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Form, Link, useLoaderData } from "react-router";
 import { $path } from "safe-routes";
@@ -61,6 +60,7 @@ import { z } from "zod";
 import { DisplayCollection, ProRequiredAlert } from "~/components/common";
 import {
 	ExerciseHistory,
+	WorkoutRevisionScheduledAlert,
 	displayDistanceWithUnit,
 	displayWeightWithUnit,
 } from "~/components/fitness";
@@ -69,18 +69,18 @@ import {
 	FitnessEntity,
 	PRO_REQUIRED_MESSAGE,
 	dayjsLib,
-	getPartialMetadataDetailsQuery,
 	openConfirmationModal,
-} from "~/lib/generals";
+} from "~/lib/common";
 import {
 	useConfirmSubmit,
 	useCoreDetails,
 	useGetWorkoutStarter,
+	useMetadataDetails,
 	useUserPreferences,
 	useUserUnitSystem,
 } from "~/lib/hooks";
 import { duplicateOldWorkout } from "~/lib/state/fitness";
-import { useAddEntityToCollection } from "~/lib/state/media";
+import { useAddEntityToCollections } from "~/lib/state/media";
 import {
 	createToastHeaders,
 	redirectWithToast,
@@ -178,6 +178,8 @@ export const action = async ({ request }: Route.ActionArgs) => {
 	return await match(intent)
 		.with("edit", async () => {
 			const submission = processSubmission(formData, editWorkoutSchema);
+			submission.startTime = dayjsLib(submission.startTime).toISOString();
+			submission.endTime = dayjsLib(submission.endTime).toISOString();
 			await serverGqlService.authenticatedRequest(
 				request,
 				UpdateUserWorkoutAttributesDocument,
@@ -220,9 +222,9 @@ const deleteSchema = z.object({
 });
 
 const editWorkoutSchema = z.object({
-	startTime: z.string(),
-	endTime: z.string(),
 	id: z.string(),
+	endTime: z.string(),
+	startTime: z.string(),
 });
 
 export default function Page() {
@@ -241,11 +243,14 @@ export default function Page() {
 	);
 	const [isWorkoutLoading, setIsWorkoutLoading] = useState(false);
 	const startWorkout = useGetWorkoutStarter();
-	const [_a, setAddEntityToCollectionData] = useAddEntityToCollection();
+	const [_a, setAddEntityToCollectionsData] = useAddEntityToCollections();
 	const entityLot = match(loaderData.entity)
 		.with(FitnessEntity.Workouts, () => EntityLot.Workout)
 		.with(FitnessEntity.Templates, () => EntityLot.WorkoutTemplate)
 		.exhaustive();
+	const images = loaderData.information.assets?.s3Images || [];
+	const videos = loaderData.information.assets?.s3Videos || [];
+	const hasAssets = images.length > 0 || videos.length > 0;
 
 	const performDecision = async (params: {
 		action: FitnessAction;
@@ -260,8 +265,6 @@ export default function Page() {
 			params.action,
 			loaderData.caloriesBurnt ? Number(loaderData.caloriesBurnt) : undefined,
 			loaderData.information,
-			coreDetails,
-			userPreferences.fitness,
 			params,
 		);
 		startWorkout(workout, params.action);
@@ -286,21 +289,21 @@ export default function Page() {
 						<Stack>
 							<Title order={3}>Adjust times</Title>
 							<DateTimePicker
-								label="Start time"
 								required
 								name="startTime"
+								label="Start time"
 								defaultValue={new Date(loaderData.startTime)}
 							/>
 							<DateTimePicker
-								label="End time"
 								required
 								name="endTime"
+								label="End time"
 								defaultValue={new Date(loaderData.endTime)}
 							/>
 							<Button
-								variant="outline"
-								type="submit"
 								name="id"
+								type="submit"
+								variant="outline"
 								value={loaderData.entityId}
 							>
 								Submit
@@ -311,6 +314,7 @@ export default function Page() {
 			) : null}
 			<Container size="xs">
 				<Stack>
+					<WorkoutRevisionScheduledAlert />
 					<Group justify="space-between" wrap="nowrap">
 						<Title>{loaderData.entityName}</Title>
 						<Menu shadow="md" position="bottom-end">
@@ -399,7 +403,7 @@ export default function Page() {
 									.exhaustive()}
 								<Menu.Item
 									onClick={() =>
-										setAddEntityToCollectionData({
+										setAddEntityToCollectionsData({
 											entityLot,
 											entityId: loaderData.entityId,
 											alreadyInCollections: loaderData.collections.map(
@@ -609,12 +613,16 @@ export default function Page() {
 							<Text span>{loaderData.information.comment}</Text>
 						</Box>
 					) : null}
-					{loaderData.information.assets &&
-					loaderData.information.assets.images.length > 0 ? (
+					{hasAssets ? (
 						<Avatar.Group>
-							{loaderData.information.assets.images.map((i) => (
+							{images.map((i) => (
 								<Anchor key={i} href={i} target="_blank">
 									<Avatar src={i} />
+								</Anchor>
+							))}
+							{videos.map((v) => (
+								<Anchor key={v} href={v} target="_blank">
+									<Avatar name="Video" />
 								</Anchor>
 							))}
 						</Avatar.Group>
@@ -638,15 +646,15 @@ const ConsumedMetadataDisplay = (props: {
 	metadataId: string;
 }) => {
 	const { ref, inViewport } = useInViewport();
-	const { data: metadataDetails } = useQuery({
-		...getPartialMetadataDetailsQuery(props.metadataId),
-		enabled: inViewport,
-	});
+	const { data: metadataDetails } = useMetadataDetails(
+		props.metadataId,
+		inViewport,
+	);
 
 	return (
 		<Link to={$path("/media/item/:id", { id: props.metadataId })} ref={ref}>
 			<Tooltip label={metadataDetails?.title}>
-				<Avatar src={metadataDetails?.image} />
+				<Avatar src={metadataDetails?.assets.remoteImages.at(0)} />
 			</Tooltip>
 		</Link>
 	);

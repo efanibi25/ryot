@@ -1,3 +1,7 @@
+<script setup>
+import variables from "./variables";
+</script>
+
 # Installation
 
 Use the following docker-compose file:
@@ -33,12 +37,14 @@ volumes:
 ```
 
 If you would like to run the pro version, please check [below](#upgrading-to-pro). To see
-the features of the pro version, check the [features page]({{extra.main_website_url}}).
+the features of the pro version, check the
+<a :href="`${variables.mainWebsiteUrl}/features`" target="_blank">features page</a>.
 
 ## Upgrading to Pro
 
 To upgrade to the pro version, you need to provide a `SERVER_PRO_KEY` environment variable.
-You can get a key by purchasing it from the [website]({{extra.main_website_url}}).
+You can get a key by purchasing it from the
+<a :href="variables.mainWebsiteUrl" target="_blank">website</a>.
 
 Once you have the key, you can set it in the `docker-compose.yml` file:
 
@@ -68,7 +74,7 @@ bugs and results in data loss. Only use this tag if you know what you are doing.
 
 Ryot collects anonymous usage data to help me prioritize features. It uses a self-hosted
 [Umami](https://umami.is/) instance to collect this data. In addition to page views, a
-few events are also tracked and you can find them in the [source code](https://github.com/IgnisDa/ryot/blob/6722ceb913a9c2fd67392d5812b76a30036142d1/apps/frontend/app/lib/hooks.ts#L140-L174).
+few events are also tracked and you can find them in the [source code](https://github.com/IgnisDa/ryot/blob/aa89adabc377e6da7fb8c8d768325efc3667329f/apps/frontend/app/lib/hooks.ts#L199-L222).
 
 You can opt out of this by setting a configuration parameter as described
 [here](./configuration.md#important-parameters).

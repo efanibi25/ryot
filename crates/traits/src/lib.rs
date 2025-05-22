@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use application_utils::AuthContext;
 use async_graphql::{Context, Error, Result as GraphqlResult};
 use async_trait::async_trait;
@@ -8,10 +8,11 @@ use common_models::{BackendError, PersonSourceSpecifics};
 use common_utils::ryot_log;
 use database_models::metadata_group::MetadataGroupWithoutId;
 use database_utils::{check_token, deploy_job_to_mark_user_last_activity};
-use dependent_models::{
-    MetadataGroupSearchResponse, PeopleSearchResponse, PersonDetails, SearchResults,
+use dependent_models::{PersonDetails, SearchResults};
+use media_models::{
+    MetadataDetails, MetadataGroupSearchItem, MetadataSearchItem, PartialMetadataWithoutId,
+    PeopleSearchItem,
 };
-use media_models::{MetadataDetails, MetadataSearchItem, PartialMetadataWithoutId};
 use supporting_service::SupportingService;
 
 #[async_trait]
@@ -39,9 +40,9 @@ pub trait MediaProvider {
         &self,
         query: &str,
         page: Option<i32>,
-        source_specifics: &Option<PersonSourceSpecifics>,
         display_nsfw: bool,
-    ) -> Result<PeopleSearchResponse> {
+        source_specifics: &Option<PersonSourceSpecifics>,
+    ) -> Result<SearchResults<PeopleSearchItem>> {
         bail!("This provider does not support searching people")
     }
 
@@ -62,7 +63,7 @@ pub trait MediaProvider {
         query: &str,
         page: Option<i32>,
         display_nsfw: bool,
-    ) -> Result<MetadataGroupSearchResponse> {
+    ) -> Result<SearchResults<MetadataGroupSearchItem>> {
         bail!("This provider does not support searching metadata groups")
     }
 
@@ -75,14 +76,9 @@ pub trait MediaProvider {
         bail!("This provider does not support getting group details")
     }
 
-    /// Get recommendations for a media item.
-    async fn get_recommendations_for_metadata(
-        &self,
-        identifier: &str,
-    ) -> Result<Vec<PartialMetadataWithoutId>> {
-        self.metadata_details(identifier)
-            .await
-            .map(|d| d.suggestions)
+    /// Get trending media.
+    async fn get_trending_media(&self) -> Result<Vec<PartialMetadataWithoutId>> {
+        bail!("This provider does not support getting trending media")
     }
 }
 

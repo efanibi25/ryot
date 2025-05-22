@@ -2,7 +2,6 @@ import { useAutoAnimate } from "@formkit/auto-animate/react";
 import { Sparkline } from "@mantine/charts";
 import {
 	ActionIcon,
-	Alert,
 	Anchor,
 	Box,
 	Center,
@@ -39,7 +38,6 @@ import {
 	zodIntAsString,
 } from "@ryot/ts-utils";
 import {
-	IconBellRinging,
 	IconChevronDown,
 	IconChevronUp,
 	IconClock,
@@ -64,6 +62,7 @@ import {
 	FiltersModal,
 } from "~/components/common";
 import {
+	WorkoutRevisionScheduledAlert,
 	displayDistanceWithUnit,
 	displayWeightWithUnit,
 	getSetStatisticsTextToDisplay,
@@ -75,12 +74,11 @@ import {
 	clientGqlService,
 	dayjsLib,
 	pageQueryParam,
-} from "~/lib/generals";
+} from "~/lib/common";
 import {
 	useAppSearchParam,
 	useCoreDetails,
 	useGetWorkoutStarter,
-	useUserDetails,
 	useUserUnitSystem,
 } from "~/lib/hooks";
 import {
@@ -88,7 +86,11 @@ import {
 	getExerciseDetailsQuery,
 } from "~/lib/state/fitness";
 import {
-	getEnhancedCookieName,
+	OnboardingTourStepTargets,
+	useOnboardingTour,
+} from "~/lib/state/general";
+import {
+	getSearchEnhancedCookieName,
 	redirectToFirstPageIfOnInvalidPage,
 	redirectUsingEnhancedCookieSearchParams,
 	serverGqlService,
@@ -116,7 +118,10 @@ export const loader = async ({ params, request }: Route.LoaderArgs) => {
 		params,
 		z.object({ entity: z.nativeEnum(FitnessEntity) }),
 	);
-	const cookieName = await getEnhancedCookieName(`${entity}.list`, request);
+	const cookieName = await getSearchEnhancedCookieName(
+		`${entity}.list`,
+		request,
+	);
 	await redirectUsingEnhancedCookieSearchParams(request, cookieName);
 	const query = parseSearchQuery(request, searchParamsSchema);
 	const input: UserTemplatesOrWorkoutsListInput = {
@@ -150,11 +155,11 @@ export const loader = async ({ params, request }: Route.LoaderArgs) => {
 			};
 		})
 		.exhaustive();
-	const totalPages = await redirectToFirstPageIfOnInvalidPage(
+	const totalPages = await redirectToFirstPageIfOnInvalidPage({
 		request,
-		displayData.details.total,
-		query[pageQueryParam],
-	);
+		currentPage: query[pageQueryParam],
+		totalResults: displayData.details.total,
+	});
 	return { query, entity, displayData, cookieName, totalPages };
 };
 
@@ -165,13 +170,14 @@ export const meta = ({ data }: Route.MetaArgs) => {
 export default function Page() {
 	const loaderData = useLoaderData<typeof loader>();
 	const coreDetails = useCoreDetails();
-	const userDetails = useUserDetails();
 	const [_, { setP }] = useAppSearchParam(loaderData.cookieName);
 	const startWorkout = useGetWorkoutStarter();
 	const [
 		filtersModalOpened,
 		{ open: openFiltersModal, close: closeFiltersModal },
 	] = useDisclosure(false);
+	const { advanceOnboardingTourStep } = useOnboardingTour();
+
 	const isFilterChanged =
 		loaderData.query.sortBy !== defaultFilters.sortBy ||
 		loaderData.query.orderBy !== defaultFilters.orderBy;
@@ -179,18 +185,14 @@ export default function Page() {
 	return (
 		<Container size="xs">
 			<Stack>
-				{userDetails.extraInformation?.scheduledForWorkoutRevision ? (
-					<Alert icon={<IconBellRinging />}>
-						You have scheduled a workout revision. They might be outdated until
-						revision is completed.
-					</Alert>
-				) : null}
+				<WorkoutRevisionScheduledAlert />
 				<Flex align="center" gap="md">
 					<Title>{changeCase(loaderData.entity)}</Title>
 					<ActionIcon
 						color="green"
 						variant="outline"
-						onClick={() => {
+						className={OnboardingTourStepTargets.AddNewWorkout}
+						onClick={async () => {
 							if (
 								!coreDetails.isServerKeyValidated &&
 								loaderData.entity === FitnessEntity.Templates
@@ -208,6 +210,7 @@ export default function Page() {
 									() => FitnessAction.CreateTemplate,
 								)
 								.exhaustive();
+							await advanceOnboardingTourStep();
 							startWorkout(getDefaultWorkout(action), action);
 						}}
 					>
@@ -434,7 +437,6 @@ const DisplayStat = (props: { icon: ReactElement; data: string }) => {
 const ExerciseDisplay = (props: {
 	exercise: WorkoutSummary["exercises"][number];
 }) => {
-	const unitSystem = useUserUnitSystem();
 	const { data: exerciseDetails } = useQuery(
 		getExerciseDetailsQuery(props.exercise.id),
 	);
@@ -445,7 +447,7 @@ const ExerciseDisplay = (props: {
 			const [stat] = getSetStatisticsTextToDisplay(
 				props.exercise.lot,
 				value.statistic,
-				unitSystem,
+				props.exercise.unitSystem,
 			);
 			return stat;
 		});

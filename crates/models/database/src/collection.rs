@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use common_models::CollectionExtraInformation;
 use nanoid::nanoid;
 use schematic::Schematic;
-use sea_orm::entity::prelude::*;
 use sea_orm::ActiveValue;
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(
@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
-    pub created_on: DateTimeUtc,
-    pub last_updated_on: DateTimeUtc,
     pub name: String,
-    pub description: Option<String>,
     pub user_id: String,
+    pub created_on: DateTimeUtc,
+    pub description: Option<String>,
+    pub last_updated_on: DateTimeUtc,
     #[sea_orm(column_type = "Json")]
     pub information_template: Option<Vec<CollectionExtraInformation>>,
 }

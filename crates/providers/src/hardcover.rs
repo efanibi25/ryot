@@ -2,23 +2,20 @@ use anyhow::Result;
 use application_utils::get_base_http_client;
 use async_trait::async_trait;
 use chrono::NaiveDate;
-use common_models::{PersonSourceSpecifics, SearchDetails};
+use common_models::{EntityAssets, PersonSourceSpecifics, SearchDetails};
 use common_utils::PAGE_SIZE;
 use database_models::metadata_group::MetadataGroupWithoutId;
-use dependent_models::{
-    MetadataGroupSearchResponse, MetadataPersonRelated, PeopleSearchResponse, PersonDetails,
-    SearchResults,
-};
+use dependent_models::{MetadataPersonRelated, PersonDetails, SearchResults};
 use enum_models::{MediaLot, MediaSource};
 use media_models::{
-    BookSpecifics, CommitMediaInput, MetadataDetails, MetadataGroupSearchItem,
-    MetadataImageForMediaDetails, MetadataSearchItem, PartialMetadataPerson,
-    PartialMetadataWithoutId, PeopleSearchItem, UniqueMediaIdentifier,
+    BookSpecifics, CommitMetadataGroupInput, MetadataDetails, MetadataGroupSearchItem,
+    MetadataSearchItem, PartialMetadataPerson, PartialMetadataWithoutId, PeopleSearchItem,
+    UniqueMediaIdentifier,
 };
 use nest_struct::nest_struct;
 use reqwest::{
-    header::{HeaderValue, AUTHORIZATION},
     Client,
+    header::{AUTHORIZATION, HeaderValue},
 };
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -219,16 +216,20 @@ query {{
         let mut images = vec![];
         if let Some(i) = data.image {
             if let Some(image) = i.url {
-                images.push(MetadataImageForMediaDetails { image });
+                images.push(image);
             }
         }
         for i in data.images.into_iter().flatten() {
             if let Some(image) = i.url {
-                images.push(MetadataImageForMediaDetails { image });
+                images.push(image);
             }
         }
+        let assets = EntityAssets {
+            remote_images: images,
+            ..Default::default()
+        };
         let details = MetadataDetails {
-            url_images: images,
+            assets,
             lot: MediaLot::Book,
             title: data.title.unwrap(),
             provider_rating: data.rating,
@@ -268,13 +269,14 @@ query {{
                 .into_iter()
                 .flatten()
                 .filter_map(|s| {
-                    s.series.map(|r| CommitMediaInput {
+                    s.series.map(|r| CommitMetadataGroupInput {
                         name: r.name,
                         unique: UniqueMediaIdentifier {
                             lot: MediaLot::Book,
                             identifier: r.id.to_string(),
                             source: MediaSource::Hardcover,
                         },
+                        ..Default::default()
                     })
                 })
                 .collect(),
@@ -406,7 +408,7 @@ query {{
         query: &str,
         page: Option<i32>,
         _display_nsfw: bool,
-    ) -> Result<MetadataGroupSearchResponse> {
+    ) -> Result<SearchResults<MetadataGroupSearchItem>> {
         let page = page.unwrap_or(1);
         let response = get_search_response(query, page, "series", &self.client).await?;
         let items = response
@@ -419,7 +421,8 @@ query {{
                 image: h.document.image.and_then(|i| i.url),
             })
             .collect();
-        let resp = MetadataGroupSearchResponse {
+        let resp = SearchResults {
+            items,
             details: SearchDetails {
                 total: response.found,
                 next_page: if page < response.found / PAGE_SIZE {
@@ -428,7 +431,6 @@ query {{
                     None
                 },
             },
-            items,
         };
         Ok(resp)
     }
@@ -475,7 +477,10 @@ query {{
                     }
                 }
                 let details = PersonDetails {
-                    images: Some(images),
+                    assets: EntityAssets {
+                        remote_images: images,
+                        ..Default::default()
+                    },
                     description: data.bio,
                     name: data.name.unwrap(),
                     birth_date: data.born_date,
@@ -576,9 +581,9 @@ query {{
         &self,
         query: &str,
         page: Option<i32>,
-        source_specifics: &Option<PersonSourceSpecifics>,
         _display_nsfw: bool,
-    ) -> Result<PeopleSearchResponse> {
+        source_specifics: &Option<PersonSourceSpecifics>,
+    ) -> Result<SearchResults<PeopleSearchItem>> {
         let page = page.unwrap_or(1);
         let query_type = query_type_from_specifics(source_specifics);
         let response = get_search_response(query, page, &query_type, &self.client).await?;

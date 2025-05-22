@@ -20,7 +20,6 @@ import {
 } from "@ryot/generated/graphql/backend/graphql";
 import {
 	getInitials,
-	isString,
 	parseSearchQuery,
 	truncate,
 	zodIntAsString,
@@ -36,11 +35,11 @@ import {
 } from "~/components/common";
 import {
 	clientGqlService,
-	getPartialMetadataDetailsQuery,
+	getMetadataDetailsQuery,
 	queryClient,
 	queryFactory,
-} from "~/lib/generals";
-import { pageQueryParam } from "~/lib/generals";
+} from "~/lib/common";
+import { pageQueryParam } from "~/lib/common";
 import {
 	useAppSearchParam,
 	useCoreDetails,
@@ -48,7 +47,7 @@ import {
 	useGetRandomMantineColor,
 } from "~/lib/hooks";
 import {
-	getEnhancedCookieName,
+	getSearchEnhancedCookieName,
 	redirectToFirstPageIfOnInvalidPage,
 	redirectUsingEnhancedCookieSearchParams,
 	serverGqlService,
@@ -63,19 +62,19 @@ const searchParamsSchema = z.object({
 export type SearchParams = z.infer<typeof searchParamsSchema>;
 
 export const loader = async ({ request }: Route.LoaderArgs) => {
-	const cookieName = await getEnhancedCookieName("genre.list", request);
+	const cookieName = await getSearchEnhancedCookieName("genre.list", request);
 	await redirectUsingEnhancedCookieSearchParams(request, cookieName);
 	const query = parseSearchQuery(request, searchParamsSchema);
 	const [{ genresList }] = await Promise.all([
-		serverGqlService.request(GenresListDocument, {
+		serverGqlService.authenticatedRequest(request, GenresListDocument, {
 			input: { page: query[pageQueryParam], query: query.query },
 		}),
 	]);
-	const totalPages = await redirectToFirstPageIfOnInvalidPage(
+	const totalPages = await redirectToFirstPageIfOnInvalidPage({
 		request,
-		genresList.details.total,
-		query[pageQueryParam],
-	);
+		currentPage: query[pageQueryParam],
+		totalResults: genresList.details.total,
+	});
 	return { query, genresList, cookieName, totalPages };
 };
 
@@ -144,10 +143,10 @@ const DisplayGenre = (props: { genreId: string }) => {
 			let images = [];
 			for (const content of genreDetails.contents.items) {
 				if (images.length === 4) break;
-				const { image } = await queryClient.ensureQueryData(
-					getPartialMetadataDetailsQuery(content),
+				const { assets } = await queryClient.ensureQueryData(
+					getMetadataDetailsQuery(content),
 				);
-				if (isString(image)) images.push(image);
+				if (assets.remoteImages.length > 0) images.push(assets.remoteImages[0]);
 			}
 			if (images.length < 4) images = images.splice(0, 1);
 			return { genreDetails, images };

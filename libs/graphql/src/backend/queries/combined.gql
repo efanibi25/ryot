@@ -55,6 +55,7 @@ query UserCollectionsList {
 				required
 				description
 				defaultValue
+				possibleValues
 			}
 		}
 	}
@@ -72,9 +73,38 @@ query UserIntegrations {
 		maximumProgress
 		minimumProgress
 		syncToOwnedCollection
+		extraSettings {
+			disableOnContinuousErrors
+		}
 		triggerResult {
 			error
 			finishedAt
+		}
+		providerSpecifics {
+			plexYankToken
+			plexYankBaseUrl
+			plexSinkUsername
+			audiobookshelfToken
+			audiobookshelfBaseUrl
+			komgaBaseUrl
+			komgaUsername
+			komgaPassword
+			komgaProvider
+			radarrBaseUrl
+			radarrApiKey
+			radarrProfileId
+			radarrRootFolderPath
+			radarrSyncCollectionIds
+			sonarrProfileId
+			sonarrApiKey
+			sonarrBaseUrl
+			sonarrRootFolderPath
+			sonarrSyncCollectionIds
+			jellyfinPushBaseUrl
+			jellyfinPushUsername
+			jellyfinPushPassword
+			youtubeMusicTimezone
+			youtubeMusicAuthCookie
 		}
 	}
 }
@@ -118,16 +148,6 @@ query UserCalendarEvents($input: UserCalendarEventInput!) {
 		events {
 			...CalendarEventPart
 		}
-	}
-}
-
-query MetadataPartialDetails($metadataId: String!) {
-	metadataPartialDetails(metadataId: $metadataId) {
-		id
-		lot
-		title
-		image
-		publishYear
 	}
 }
 
@@ -185,7 +205,9 @@ query ExerciseDetails($exerciseId: String!) {
 		createdByUserId
 		attributes {
 			instructions
-			images
+			assets {
+				...EntityAssetsPart
+			}
 		}
 	}
 }
@@ -354,22 +376,19 @@ query MetadataGroupDetails($metadataGroupId: String!) {
 			sourceUrl
 			identifier
 			description
-			displayImages
+			assets {
+				...EntityAssetsPart
+			}
 		}
 	}
 }
 
 query MetadataGroupSearch($input: MetadataGroupSearchInput!) {
 	metadataGroupSearch(input: $input) {
+		items
 		details {
 			total
 			nextPage
-		}
-		items {
-			name
-			image
-			parts
-			identifier
 		}
 	}
 }
@@ -389,36 +408,28 @@ query UserMetadataList($input: UserMetadataListInput!) {
 
 query MetadataSearch($input: MetadataSearchInput!) {
 	metadataSearch(input: $input) {
+		items
 		details {
 			total
 			nextPage
-		}
-		items {
-			title
-			image
-			identifier
-			publishYear
 		}
 	}
 }
 
 query PeopleSearch($input: PeopleSearchInput!) {
 	peopleSearch(input: $input) {
+		items
 		details {
 			total
 			nextPage
-		}
-		items {
-			name
-			image
-			birthYear
-			identifier
 		}
 	}
 }
 
 query UserMetadataGroupDetails($metadataGroupId: String!) {
 	userMetadataGroupDetails(metadataGroupId: $metadataGroupId) {
+		hasInteracted
+		averageRating
 		isRecentlyConsumed
 		reviews {
 			...ReviewItemPart
@@ -431,6 +442,8 @@ query UserMetadataGroupDetails($metadataGroupId: String!) {
 
 query UserPersonDetails($personId: String!) {
 	userPersonDetails(personId: $personId) {
+		hasInteracted
+		averageRating
 		isRecentlyConsumed
 		collections {
 			...CollectionPart
@@ -518,3 +531,16 @@ query UserAnalyticsParameters {
 	}
 }
 
+query TrendingMetadata {
+	trendingMetadata
+}
+
+query CollectionRecommendations($input: CollectionRecommendationsInput!) {
+	collectionRecommendations(input: $input) {
+		items
+		details {
+			total
+			nextPage
+		}
+	}
+}

@@ -7,6 +7,7 @@ import type {
 import { useQuery } from "@tanstack/react-query";
 import Cookies from "js-cookie";
 import type { FormEvent } from "react";
+import { useNavigate } from "react-router";
 import {
 	useRevalidator,
 	useRouteLoaderData,
@@ -15,14 +16,18 @@ import {
 } from "react-router";
 import { $path } from "safe-routes";
 import invariant from "tiny-invariant";
-import { useInterval } from "usehooks-ts";
+import { useInterval, useMediaQuery } from "usehooks-ts";
 import {
 	type FitnessAction,
 	dayjsLib,
 	getMetadataDetailsQuery,
+	getMetadataGroupDetailsQuery,
+	getPersonDetailsQuery,
 	getUserMetadataDetailsQuery,
+	getUserMetadataGroupDetailsQuery,
+	getUserPersonDetailsQuery,
 	selectRandomElement,
-} from "~/lib/generals";
+} from "~/lib/common";
 import {
 	type InProgressWorkout,
 	useCurrentWorkout,
@@ -51,7 +56,6 @@ export const useFallbackImageUrl = (text = "No Image") => {
 
 export const useAppSearchParam = (cookieKey: string) => {
 	const [searchParams, setSearchParams] = useSearchParams();
-	const coreDetails = useCoreDetails();
 
 	const updateCookieP = (key: string, value?: string | null) => {
 		const cookieValue = Cookies.get(cookieKey);
@@ -59,7 +63,7 @@ export const useAppSearchParam = (cookieKey: string) => {
 		if (!value) cookieSearchParams.delete(key);
 		else cookieSearchParams.set(key, value);
 		Cookies.set(cookieKey, cookieSearchParams.toString(), {
-			expires: dayjsLib().add(coreDetails.tokenValidForDays, "day").toDate(),
+			expires: dayjsLib().add(10, "day").toDate(),
 		});
 	};
 
@@ -101,6 +105,7 @@ export const useConfirmSubmit = () => {
 
 export const useGetWorkoutStarter = () => {
 	const revalidator = useRevalidator();
+	const navigate = useNavigate();
 	const [_w, setCurrentWorkout] = useCurrentWorkout();
 	const [_t, setTimer] = useCurrentWorkoutTimerAtom();
 	const [_s, setStopwatch] = useCurrentWorkoutStopwatchAtom();
@@ -109,25 +114,50 @@ export const useGetWorkoutStarter = () => {
 		setTimer(null);
 		setStopwatch(null);
 		setCurrentWorkout(wkt);
-		window.location.href = $path("/fitness/:action", { action });
+		navigate($path("/fitness/:action", { action }));
 		revalidator.revalidate();
 	};
 	return fn;
 };
 
-export const useMetadataDetails = (
-	metadataId?: string | null,
-	enabled?: boolean,
-) => {
+export const useMetadataDetails = (metadataId?: string, enabled?: boolean) => {
 	return useQuery({ ...getMetadataDetailsQuery(metadataId), enabled });
 };
 
 export const useUserMetadataDetails = (
-	metadataId?: string | null,
+	metadataId?: string,
 	enabled?: boolean,
 ) => {
 	return useQuery({
 		...getUserMetadataDetailsQuery(metadataId),
+		enabled,
+	});
+};
+
+export const usePersonDetails = (personId?: string, enabled?: boolean) => {
+	return useQuery({ ...getPersonDetailsQuery(personId), enabled });
+};
+
+export const useUserPersonDetails = (personId?: string, enabled?: boolean) => {
+	return useQuery({ ...getUserPersonDetailsQuery(personId), enabled });
+};
+
+export const useMetadataGroupDetails = (
+	metadataGroupId?: string,
+	enabled?: boolean,
+) => {
+	return useQuery({
+		...getMetadataGroupDetailsQuery(metadataGroupId),
+		enabled,
+	});
+};
+
+export const useUserMetadataGroupDetails = (
+	metadataGroupId?: string,
+	enabled?: boolean,
+) => {
+	return useQuery({
+		...getUserMetadataGroupDetailsQuery(metadataGroupId),
 		enabled,
 	});
 };
@@ -184,14 +214,22 @@ export const useApplicationEvents = () => {
 	const addToCollection = (entityLot: EntityLot) => {
 		sendEvent("Add To Collection", { entityLot });
 	};
+	const startOnboardingTour = () => {
+		sendEvent("Start Onboarding Tour", {});
+	};
+	const completeOnboardingTour = () => {
+		sendEvent("Complete Onboarding Tour", {});
+	};
 
 	return {
-		updateProgress,
 		postReview,
 		deployImport,
 		createWorkout,
-		createMeasurement,
+		updateProgress,
 		addToCollection,
+		createMeasurement,
+		startOnboardingTour,
+		completeOnboardingTour,
 	};
 };
 
@@ -212,4 +250,14 @@ export const useIsFitnessActionActive = () => {
 	const [currentWorkout] = useCurrentWorkout();
 	const action = currentWorkout?.currentAction;
 	return action !== undefined;
+};
+
+export const useIsMobile = () => {
+	const isMobile = useMediaQuery("(max-width: 768px)");
+	return isMobile;
+};
+
+export const useIsOnboardingTourCompleted = () => {
+	const dashboardData = useDashboardLayoutData();
+	return dashboardData.isOnboardingTourCompleted;
 };

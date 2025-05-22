@@ -54,13 +54,21 @@ impl IntegrationService {
         }
         new_trigger_result.push_front(IntegrationTriggerResult { error, finished_at });
         let are_all_errors = new_trigger_result.iter().take(5).all(|r| r.error.is_some());
+
+        let should_disable =
+            integration.extra_settings.disable_on_continuous_errors && are_all_errors;
+
         let mut integration: integration::ActiveModel = integration.clone().into();
         integration.last_finished_at = last_finished_at;
         integration.trigger_result = ActiveValue::Set(new_trigger_result.into());
-        integration.is_disabled = ActiveValue::Set(Some(are_all_errors));
+
+        if should_disable {
+            integration.is_disabled = ActiveValue::Set(Some(true));
+        }
+
         let integration = integration.update(&self.0.db).await?;
 
-        if are_all_errors {
+        if should_disable {
             send_notification_for_user(
                 &integration.user_id,
                 &self.0,
@@ -165,18 +173,19 @@ impl IntegrationService {
             return Err(Error::new("Integration is disabled".to_owned()));
         }
         let maybe_progress_update = match integration.provider {
-            IntegrationProvider::Kodi => sink::kodi::yank_progress(payload).await,
-            IntegrationProvider::Emby => sink::emby::yank_progress(payload, &self.0.db).await,
-            IntegrationProvider::JellyfinSink => sink::jellyfin::yank_progress(payload).await,
+            IntegrationProvider::Kodi => sink::kodi::sink_progress(payload).await,
+            IntegrationProvider::Emby => sink::emby::sink_progress(payload, &self.0.db).await,
+            IntegrationProvider::JellyfinSink => sink::jellyfin::sink_progress(payload).await,
             IntegrationProvider::PlexSink => {
                 let specifics = integration.clone().provider_specifics.unwrap();
-                sink::plex::yank_progress(payload, &self.0.db, specifics.plex_sink_username).await
+                sink::plex::sink_progress(payload, &self.0.db, specifics.plex_sink_username).await
             }
-            IntegrationProvider::GenericJson => sink::generic_json::yank_progress(payload).await,
+            IntegrationProvider::GenericJson => sink::generic_json::sink_progress(payload).await,
             _ => return Err(Error::new("Unsupported integration source".to_owned())),
         };
         match maybe_progress_update {
-            Ok(pu) => {
+            Ok(None) => Ok("No progress update".to_owned()),
+            Ok(Some(pu)) => {
                 self.integration_progress_update(integration, pu)
                     .await
                     .trace_ok();

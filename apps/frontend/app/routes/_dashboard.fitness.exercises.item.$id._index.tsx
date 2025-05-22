@@ -78,7 +78,7 @@ import {
 	clientGqlService,
 	dayjsLib,
 	getDateFromTimeSpan,
-} from "~/lib/generals";
+} from "~/lib/common";
 import {
 	useCoreDetails,
 	useIsFitnessActionActive,
@@ -88,11 +88,12 @@ import {
 } from "~/lib/hooks";
 import {
 	addExerciseToCurrentWorkout,
+	getExerciseImages,
 	getWorkoutDetailsQuery,
 	useCurrentWorkout,
 	useMergingExercise,
 } from "~/lib/state/fitness";
-import { useAddEntityToCollection, useReviewEntity } from "~/lib/state/media";
+import { useAddEntityToCollections, useReviewEntity } from "~/lib/state/media";
 import { serverGqlService } from "~/lib/utilities.server";
 import type { Route } from "./+types/_dashboard.fitness.exercises.item.$id._index";
 
@@ -138,7 +139,7 @@ export default function Page() {
 	const [currentWorkout, setCurrentWorkout] = useCurrentWorkout();
 	const navigate = useNavigate();
 	const isFitnessActionActive = useIsFitnessActionActive();
-	const [_a, setAddEntityToCollectionData] = useAddEntityToCollection();
+	const [_a, setAddEntityToCollectionsData] = useAddEntityToCollections();
 	const [timeSpanForCharts, setTimeSpanForCharts] = useLocalStorage(
 		"ExerciseChartTimeSpan",
 		TimeSpan.Last90Days,
@@ -180,6 +181,7 @@ export default function Page() {
 		coreDetails.exerciseParameters.lotMapping.find(
 			(lm) => lm.lot === loaderData.exerciseDetails.lot,
 		)?.bests || [];
+	const images = getExerciseImages(loaderData.exerciseDetails);
 
 	return (
 		<>
@@ -325,7 +327,7 @@ export default function Page() {
 							<Stack>
 								<ScrollArea>
 									<Flex gap={6}>
-										{loaderData.exerciseDetails.attributes.images.map((i) => (
+										{images.map((i) => (
 											<Image key={i} radius="md" src={i} h="200px" w="248px" />
 										))}
 									</Flex>
@@ -577,7 +579,7 @@ export default function Page() {
 									<Button
 										variant="outline"
 										onClick={() => {
-											setAddEntityToCollectionData({
+											setAddEntityToCollectionsData({
 												entityId: loaderData.exerciseId,
 												entityLot: EntityLot.Exercise,
 												alreadyInCollections:

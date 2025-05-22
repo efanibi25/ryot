@@ -15,6 +15,7 @@ import {
 	Paper,
 	Select,
 	Stack,
+	TagsInput,
 	Text,
 	TextInput,
 	Textarea,
@@ -38,7 +39,6 @@ import {
 import {
 	changeCase,
 	getActionIntent,
-	isString,
 	processSubmission,
 	truncate,
 	zodCheckboxAsString,
@@ -66,12 +66,12 @@ import {
 import {
 	PRO_REQUIRED_MESSAGE,
 	clientGqlService,
-	getPartialMetadataDetailsQuery,
+	getMetadataDetailsQuery,
 	openConfirmationModal,
 	queryClient,
 	queryFactory,
 	zodCommaDelimitedString,
-} from "~/lib/generals";
+} from "~/lib/common";
 import {
 	useAppSearchParam,
 	useConfirmSubmit,
@@ -82,7 +82,7 @@ import {
 } from "~/lib/hooks";
 import {
 	createToastHeaders,
-	getEnhancedCookieName,
+	getSearchEnhancedCookieName,
 	getUserCollectionsListRaw,
 	redirectUsingEnhancedCookieSearchParams,
 	serverGqlService,
@@ -90,7 +90,10 @@ import {
 import type { Route } from "./+types/_dashboard.collections.list";
 
 export const loader = async ({ request }: Route.LoaderArgs) => {
-	const cookieName = await getEnhancedCookieName("collections.list", request);
+	const cookieName = await getSearchEnhancedCookieName(
+		"collections.list",
+		request,
+	);
 	await redirectUsingEnhancedCookieSearchParams(request, cookieName);
 	const [{ usersList }, userCollectionsList] = await Promise.all([
 		serverGqlService.authenticatedRequest(request, UsersListDocument, {}),
@@ -186,6 +189,7 @@ const createOrUpdateSchema = z.object({
 				description: z.string(),
 				defaultValue: z.string().optional(),
 				required: zodCheckboxAsString.optional(),
+				possibleValues: zodCommaDelimitedString.optional(),
 				lot: z.nativeEnum(CollectionExtraInformationLot),
 			}),
 		)
@@ -257,7 +261,7 @@ export default function Page() {
 						</Modal>
 					</Flex>
 					<ExpireCacheKeyButton
-						cacheId={loaderData.userCollectionsList.cacheId}
+						action={{ cacheId: loaderData.userCollectionsList.cacheId }}
 					/>
 				</Group>
 				<Group wrap="nowrap">
@@ -333,10 +337,10 @@ const DisplayCollection = (props: {
 			for (const content of collectionContents.response.results.items) {
 				if (images.length === 5) break;
 				if (content.entityLot !== EntityLot.Metadata) continue;
-				const { image } = await queryClient.ensureQueryData(
-					getPartialMetadataDetailsQuery(content.entityId),
+				const { assets } = await queryClient.ensureQueryData(
+					getMetadataDetailsQuery(content.entityId),
 				);
-				if (isString(image)) images.push(image);
+				if (assets.remoteImages.length > 0) images.push(assets.remoteImages[0]);
 			}
 			return images;
 		},
@@ -535,19 +539,15 @@ const CreateOrUpdateModal = (props: {
 		);
 
 	return (
-		<Box
-			method="POST"
-			component={Form}
-			action={withQuery(".", { intent: "createOrUpdate" })}
-		>
+		<Form method="POST" action={withQuery(".", { intent: "createOrUpdate" })}>
 			<Stack>
 				<Title order={3}>
 					{props.toUpdateCollection?.id ? "Update" : "Create"} collection
 				</Title>
 				<TextInput
-					label="Name"
 					required
 					name="name"
+					label="Name"
 					defaultValue={props.toUpdateCollection?.name}
 					readOnly={props.toUpdateCollection?.isDefault}
 					description={
@@ -628,50 +628,66 @@ const CreateOrUpdateModal = (props: {
 						{informationTemplate.map((field, index) => (
 							<Paper withBorder key={index.toString()} p="xs">
 								<TextInput
-									label="Name"
 									required
-									name={`informationTemplate[${index}].name`}
 									size="xs"
+									label="Name"
 									defaultValue={field.name}
+									name={`informationTemplate[${index}].name`}
 								/>
 								<Textarea
-									label="Description"
 									required
-									name={`informationTemplate[${index}].description`}
 									size="xs"
+									label="Description"
 									defaultValue={field.description}
+									name={`informationTemplate[${index}].description`}
 								/>
 								<Group wrap="nowrap">
 									<Select
-										label="Input type"
-										required
 										flex={1}
+										required
+										size="xs"
+										label="Input type"
+										defaultValue={field.lot}
 										name={`informationTemplate[${index}].lot`}
 										data={Object.values(CollectionExtraInformationLot).map(
 											(lot) => ({ value: lot, label: changeCase(lot) }),
 										)}
-										size="xs"
-										defaultValue={field.lot}
+										onChange={(v) => {
+											setInformationTemplate.setItem(index, {
+												...field,
+												lot: v as CollectionExtraInformationLot,
+											});
+										}}
 									/>
-									<TextInput
-										label="Default value"
-										flex={1}
-										name={`informationTemplate[${index}].defaultValue`}
-										size="xs"
-										defaultValue={field.defaultValue || undefined}
-									/>
+									{field.lot !== CollectionExtraInformationLot.StringArray ? (
+										<TextInput
+											flex={1}
+											size="xs"
+											label="Default value"
+											defaultValue={field.defaultValue || undefined}
+											name={`informationTemplate[${index}].defaultValue`}
+										/>
+									) : null}
 								</Group>
+								{field.lot === CollectionExtraInformationLot.StringArray ? (
+									<TagsInput
+										size="xs"
+										label="Possible values"
+										defaultValue={field.possibleValues || []}
+										name={`informationTemplate[${index}].possibleValues`}
+									/>
+								) : null}
 								<Group mt="xs" justify="space-around">
 									<Checkbox
 										size="sm"
 										label="Required"
-										name={`informationTemplate[${index}].required`}
 										defaultChecked={field.required || undefined}
+										name={`informationTemplate[${index}].required`}
 									/>
 									<Button
 										size="xs"
-										variant="subtle"
 										color="red"
+										variant="subtle"
 										leftSection={<IconTrash />}
 										onClick={() => setInformationTemplate.remove(index)}
 									>
@@ -688,9 +704,9 @@ const CreateOrUpdateModal = (props: {
 					value={props.toUpdateCollection?.id}
 					name={props.toUpdateCollection ? "updateId" : undefined}
 				>
-					{props.toUpdateCollection ? "Update" : "Create"}
+					{props.toUpdateCollection?.id ? "Update" : "Create"}
 				</Button>
 			</Stack>
-		</Box>
+		</Form>
 	);
 };

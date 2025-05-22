@@ -2,15 +2,16 @@
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
+use common_models::EntityAssets;
 use enum_models::{MediaLot, MediaSource};
 use media_models::{
     AnimeSpecifics, AudioBookSpecifics, BookSpecifics, MangaSpecifics, MetadataExternalIdentifiers,
-    MetadataFreeCreator, MetadataImage, MetadataVideo, MovieSpecifics, MusicSpecifics,
-    PodcastSpecifics, ShowSpecifics, VideoGameSpecifics, VisualNovelSpecifics, WatchProvider,
+    MetadataFreeCreator, MovieSpecifics, MusicSpecifics, PodcastSpecifics, ShowSpecifics,
+    VideoGameSpecifics, VisualNovelSpecifics, WatchProvider,
 };
 use nanoid::nanoid;
 use rust_decimal::Decimal;
-use sea_orm::{entity::prelude::*, ActiveValue};
+use sea_orm::{ActiveValue, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize, Default)]
@@ -22,6 +23,8 @@ pub struct Model {
     pub title: String,
     pub identifier: String,
     pub source: MediaSource,
+    #[sea_orm(column_type = "Json")]
+    pub assets: EntityAssets,
     pub is_nsfw: Option<bool>,
     pub created_on: DateTimeUtc,
     pub is_partial: Option<bool>,
@@ -29,16 +32,11 @@ pub struct Model {
     pub source_url: Option<String>,
     pub description: Option<String>,
     pub last_updated_on: DateTimeUtc,
-    pub is_recommendation: Option<bool>,
     pub publish_date: Option<NaiveDate>,
     pub provider_rating: Option<Decimal>,
     pub original_language: Option<String>,
     pub production_status: Option<String>,
-    #[sea_orm(column_type = "Json")]
-    pub images: Option<Vec<MetadataImage>>,
     pub created_by_user_id: Option<String>,
-    #[sea_orm(column_type = "Json")]
-    pub videos: Option<Vec<MetadataVideo>>,
     pub book_specifics: Option<BookSpecifics>,
     pub show_specifics: Option<ShowSpecifics>,
     pub anime_specifics: Option<AnimeSpecifics>,

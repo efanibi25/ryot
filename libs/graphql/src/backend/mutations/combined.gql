@@ -26,34 +26,12 @@ mutation AddEntityToCollection($input: ChangeCollectionToEntityInput!) {
 	addEntityToCollection(input: $input)
 }
 
-mutation CommitMetadata($input: CommitMediaInput!) {
-	commitMetadata(input: $input) {
-		id
-	}
-}
-
-mutation CommitMetadataGroup($input: CommitMediaInput!) {
-	commitMetadataGroup(input: $input) {
-		id
-	}
-}
-
-mutation CommitPerson($input: CommitPersonInput!) {
-	commitPerson(input: $input) {
-		id
-	}
-}
-
 mutation CreateCustomExercise($input: ExerciseInput!) {
 	createCustomExercise(input: $input)
 }
 
 mutation UpdateCustomExercise($input: UpdateCustomExerciseInput!) {
 	updateCustomExercise(input: $input)
-}
-
-mutation UpdateUserIntegration($input: UpdateUserIntegrationInput!) {
-	updateUserIntegration(input: $input)
 }
 
 mutation CreateCustomMetadata($input: CreateCustomMetadataInput!) {
@@ -86,10 +64,10 @@ mutation CreateUserNotificationPlatform(
 	createUserNotificationPlatform(input: $input)
 }
 
-mutation CreateUserIntegration($input: CreateUserIntegrationInput!) {
-	createUserIntegration(input: $input) {
-		id
-	}
+mutation CreateOrUpdateUserIntegration(
+	$input: CreateOrUpdateUserIntegrationInput!
+) {
+	createOrUpdateUserIntegration(input: $input)
 }
 
 mutation CreateOrUpdateUserWorkout($input: UserWorkoutInput!) {
