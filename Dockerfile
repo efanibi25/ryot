@@ -1,16 +1,19 @@
 ARG NODE_BASE_IMAGE=node:20.10.0-bookworm-slim
 
+# Stage 1: Frontend build base
 FROM $NODE_BASE_IMAGE AS frontend-build-base
 ENV MOON_TOOLCHAIN_FORCE_GLOBALS=true
 WORKDIR /app
 RUN apt update && apt install -y --no-install-recommends git curl ca-certificates xz-utils
 RUN npm install -g @moonrepo/cli && moon --version
 
+# Stage 2: Frontend workspace
 FROM frontend-build-base AS frontend-workspace
 WORKDIR /app
 COPY . .
 RUN moon docker scaffold frontend
 
+# Stage 3: Frontend builder
 FROM frontend-build-base AS frontend-builder
 WORKDIR /app
 COPY --from=frontend-workspace /app/.moon/docker/workspace .
@@ -19,13 +22,42 @@ COPY --from=frontend-workspace /app/.moon/docker/sources .
 RUN moon run frontend:build
 RUN moon docker prune
 
-FROM --platform=${BUILDPLATFORM} alpine AS artifact
-COPY artifact/ /artifact/
-ARG TARGETARCH
-ENV TARGETARCH=${TARGETARCH}
-RUN mv /artifact/backend-${TARGETARCH}/backend /artifact/backend
-RUN chmod +x /artifact/backend
+# Stage 4: Build backend binaries
+FROM rust:latest AS backend-builder
 
+# Build-time arguments
+ARG DATABASE_URL
+ARG DEFAULT_TMDB_ACCESS_TOKEN
+ARG DEFAULT_MAL_CLIENT_ID
+ARG TRAKT_CLIENT_ID
+ARG UNKEY_API_ID
+ARG APP_VERSION
+
+# Runtime environment variables
+ENV DATABASE_URL=${DATABASE_URL}
+ENV DEFAULT_TMDB_ACCESS_TOKEN=${DEFAULT_TMDB_ACCESS_TOKEN}
+ENV DEFAULT_MAL_CLIENT_ID=${DEFAULT_MAL_CLIENT_ID}
+ENV TRAKT_CLIENT_ID=${TRAKT_CLIENT_ID}
+ENV UNKEY_API_ID=${UNKEY_API_ID}
+ENV APP_VERSION=${APP_VERSION}
+
+# Install dependencies for x86_64
+RUN apt-get update && \
+    apt-get install -y \
+        libssl-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add the x86_64 target
+RUN rustup target add x86_64-unknown-linux-gnu
+
+WORKDIR /app
+COPY . .
+
+# Build for x86_64
+RUN cargo build --release --target x86_64-unknown-linux-gnu
+
+# Stage 5: Final image
 FROM $NODE_BASE_IMAGE
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
@@ -45,10 +77,14 @@ COPY ci/Caddyfile /etc/caddy/Caddyfile
 COPY --from=frontend-builder --chown=ryot:ryot /app/apps/frontend/node_modules ./node_modules
 COPY --from=frontend-builder --chown=ryot:ryot /app/apps/frontend/package.json ./package.json
 COPY --from=frontend-builder --chown=ryot:ryot /app/apps/frontend/build ./build
-COPY --from=artifact --chown=ryot:ryot /artifact/backend /usr/local/bin/backend
+
+#Copy the backend binary directly from the backend-builder stage
+COPY --from=backend-builder --chown=ryot:ryot /app/target/x86_64-unknown-linux-gnu/release/backend /usr/local/bin/backend
+RUN chmod +x /usr/local/bin/backend
+
 CMD [ \
-    "concurrently", "--names", "frontend,backend,proxy", "--kill-others", \
-    "PORT=3000 npx react-router-serve ./build/server/index.js", \
-    "BACKEND_PORT=5000 /usr/local/bin/backend", \
-    "caddy run --config /etc/caddy/Caddyfile" \
-    ]
+   "concurrently", "--names", "frontend,backend,proxy", "--kill-others", \
+   "PORT=3000 npx react-router-serve ./build/server/index.js", \
+   "BACKEND_PORT=5000 /usr/local/bin/backend", \
+   "caddy run --config /etc/caddy/Caddyfile" \
+   ]

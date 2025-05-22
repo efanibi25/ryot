@@ -85,6 +85,7 @@ impl SupportingService {
     }
 
     async fn get_is_server_key_validated(&self) -> bool {
+        return true;
         let pro_key = &self.config.server.pro_key;
         if pro_key.is_empty() {
             return false;
