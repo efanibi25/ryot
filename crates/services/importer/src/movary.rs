@@ -1,19 +1,18 @@
-use async_graphql::Result;
+use anyhow::Result;
 use chrono::NaiveDate;
 use common_models::DefaultCollection;
 use common_utils::convert_naive_to_utc;
 use csv::Reader;
-use dependent_models::{ImportCompletedItem, ImportResult};
+use dependent_models::{CollectionToEntityDetails, ImportCompletedItem, ImportResult};
 use enum_models::{ImportSource, MediaLot, MediaSource};
 use media_models::{
     DeployMovaryImportInput, ImportOrExportItemRating, ImportOrExportItemReview,
     ImportOrExportMetadataItemSeen,
 };
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use rust_decimal::{Decimal, dec};
 use serde::{Deserialize, Serialize};
 
-use super::{ImportFailStep, ImportFailedItem, ImportOrExportMetadataItem};
+use crate::{ImportFailStep, ImportFailedItem, ImportOrExportMetadataItem};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +52,7 @@ pub async fn import(input: DeployMovaryImportInput) -> Result<ImportResult> {
                     lot: Some(lot),
                     step: ImportFailStep::InputTransformation,
                     identifier: idx.to_string(),
-                    error: Some(format!("Ratings file: {:#?}", e)),
+                    error: Some(format!("Ratings file: {e:#?}")),
                 });
                 continue;
             }
@@ -80,7 +79,7 @@ pub async fn import(input: DeployMovaryImportInput) -> Result<ImportResult> {
                     lot: Some(lot),
                     step: ImportFailStep::InputTransformation,
                     identifier: idx.to_string(),
-                    error: Some(format!("Watchlist file: {:#?}", e)),
+                    error: Some(format!("Watchlist file: {e:#?}")),
                 });
                 continue;
             }
@@ -90,7 +89,10 @@ pub async fn import(input: DeployMovaryImportInput) -> Result<ImportResult> {
             lot,
             source,
             identifier: record.tmdb_id.to_string(),
-            collections: vec![DefaultCollection::Watchlist.to_string()],
+            collections: vec![CollectionToEntityDetails {
+                collection_name: DefaultCollection::Watchlist.to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         })
     }
@@ -103,15 +105,15 @@ pub async fn import(input: DeployMovaryImportInput) -> Result<ImportResult> {
                     lot: Some(lot),
                     step: ImportFailStep::InputTransformation,
                     identifier: idx.to_string(),
-                    error: Some(format!("History file: {:#?}", e)),
+                    error: Some(format!("History file: {e:#?}")),
                 });
                 continue;
             }
         };
         let watched_at = Some(convert_naive_to_utc(record.watched_at));
         let seen_item = ImportOrExportMetadataItemSeen {
-            ended_on: watched_at.map(|d| d.date_naive()),
-            provider_watched_on: Some(ImportSource::Movary.to_string()),
+            ended_on: watched_at,
+            providers_consumed_on: Some(vec![ImportSource::Movary.to_string()]),
             ..Default::default()
         };
         let review = record.comment.map(|c| ImportOrExportItemReview {

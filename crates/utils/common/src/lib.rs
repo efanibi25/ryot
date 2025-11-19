@@ -1,17 +1,36 @@
-use std::{convert::TryInto, fmt};
+use std::{cmp::Ordering, convert::TryInto, fmt, time::Duration};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use data_encoding::BASE32;
 use enum_models::MediaSource;
 use env_utils::APP_VERSION;
-use reqwest::header::HeaderValue;
+use rand::{RngCore, rng};
+use reqwest::{
+    ClientBuilder,
+    header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT},
+};
+use sea_orm::{
+    DatabaseBackend, Statement,
+    prelude::DateTimeUtc,
+    sea_query::{PostgresQueryBuilder, SelectStatement},
+};
 use serde::de;
-use tokio::time::{Duration, sleep};
+use tokio::time::sleep;
 
-pub const PROJECT_NAME: &str = "ryot";
+pub const PAGE_SIZE: u64 = 20;
 pub const AUTHOR: &str = "ignisda";
-pub static BULK_APPLICATION_UPDATE_CHUNK_SIZE: usize = 5;
-pub static BULK_DATABASE_UPDATE_OR_DELETE_CHUNK_SIZE: usize = 2000;
+pub const PROJECT_NAME: &str = "ryot";
+pub const TWO_FACTOR_BACKUP_CODES_COUNT: u8 = 12;
+pub const FRONTEND_OAUTH_ENDPOINT: &str = "/api/auth";
 pub const AUTHOR_EMAIL: &str = "ignisda2001@gmail.com";
+pub const BULK_APPLICATION_UPDATE_CHUNK_SIZE: usize = 5;
+pub const MAX_PRESET_FILTERS_FOR_NON_PRO_USERS: u64 = 5;
+pub const MAX_IMPORT_RETRIES_FOR_PARTIAL_STATE: usize = 5;
+pub const BULK_DATABASE_UPDATE_OR_DELETE_CHUNK_SIZE: usize = 2000;
+pub const SHOW_SPECIAL_SEASON_NAMES: [&str; 2] = ["Specials", "Extras"];
+pub const APPLICATION_JSON_HEADER: HeaderValue = HeaderValue::from_static("application/json");
+pub const AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/IgnisDa/ryot/main/libs/assets/icon-512x512.png";
 pub const USER_AGENT_STR: &str = const_str::concat!(
     AUTHOR,
     "/",
@@ -22,37 +41,63 @@ pub const USER_AGENT_STR: &str = const_str::concat!(
     AUTHOR_EMAIL,
     ")"
 );
-pub const COMPILATION_TIMESTAMP: i64 = compile_time::unix!();
-pub const MAX_IMPORT_RETRIES_FOR_PARTIAL_STATE: usize = 5;
-pub const AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/IgnisDa/ryot/main/libs/assets/icon-512x512.png";
-#[cfg(not(debug_assertions))]
-pub const TEMPORARY_DIRECTORY: &str = "tmp";
-#[cfg(debug_assertions)]
-pub const TEMPORARY_DIRECTORY: &str = "/tmp";
-pub const SHOW_SPECIAL_SEASON_NAMES: [&str; 2] = ["Specials", "Extras"];
-pub static APPLICATION_JSON_HEADER: HeaderValue = HeaderValue::from_static("application/json");
-pub const FRONTEND_OAUTH_ENDPOINT: &str = "/api/auth";
-pub const PAGE_SIZE: i32 = 20;
 
-pub const PEOPLE_SEARCH_SOURCES: [MediaSource; 9] = [
-    MediaSource::Tmdb,
-    MediaSource::Anilist,
+pub fn compute_next_page(page: u64, page_size: u64, total_items: u64) -> Option<u64> {
+    page.checked_mul(page_size)
+        .and_then(|count| (count < total_items).then(|| page.checked_add(1)))
+        .flatten()
+}
+
+pub const PEOPLE_SEARCH_SOURCES: [MediaSource; 12] = [
     MediaSource::Vndb,
-    MediaSource::Openlibrary,
-    MediaSource::Audible,
-    MediaSource::MangaUpdates,
     MediaSource::Igdb,
-    MediaSource::YoutubeMusic,
+    MediaSource::Tmdb,
+    MediaSource::Tvdb,
+    MediaSource::Spotify,
+    MediaSource::Anilist,
+    MediaSource::Audible,
     MediaSource::Hardcover,
+    MediaSource::GiantBomb,
+    MediaSource::Openlibrary,
+    MediaSource::MangaUpdates,
+    MediaSource::YoutubeMusic,
 ];
 
-pub const MEDIA_SOURCES_WITHOUT_RECOMMENDATIONS: [MediaSource; 4] = [
+pub const MEDIA_SOURCES_WITHOUT_RECOMMENDATIONS: [MediaSource; 6] = [
+    MediaSource::Tvdb,
     MediaSource::Vndb,
     MediaSource::Itunes,
     MediaSource::Custom,
+    MediaSource::Spotify,
     MediaSource::GoogleBooks,
 ];
+
+/// Logging macro that targets the "ryot" tracing target
+#[macro_export]
+macro_rules! ryot_log {
+    (info, $($arg:tt)*) => {
+        tracing::info!(target: "ryot", $($arg)*);
+    };
+    (warn, $($arg:tt)*) => {
+        tracing::warn!(target: "ryot", $($arg)*);
+    };
+    (error, $($arg:tt)*) => {
+        tracing::error!(target: "ryot", $($arg)*);
+    };
+    (debug, $($arg:tt)*) => {
+        tracing::debug!(target: "ryot", $($arg)*);
+    };
+    (trace, $($arg:tt)*) => {
+        tracing::trace!(target: "ryot", $($arg)*);
+    };
+}
+
+pub fn get_temporary_directory() -> &'static str {
+    match cfg!(debug_assertions) {
+        true => "/tmp",
+        false => "tmp",
+    }
+}
 
 pub fn get_first_and_last_day_of_month(year: i32, month: u32) -> (NaiveDate, NaiveDate) {
     let first_day = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
@@ -72,11 +117,15 @@ pub fn convert_date_to_year(d: &str) -> Option<i32> {
     convert_string_to_date(d).map(|d| d.format("%Y").to_string().parse::<i32>().unwrap())
 }
 
-pub fn convert_naive_to_utc(d: NaiveDate) -> DateTime<Utc> {
+pub fn convert_naive_to_utc(d: NaiveDate) -> DateTimeUtc {
     DateTime::from_naive_utc_and_offset(
         NaiveDateTime::new(d, NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
         Utc,
     )
+}
+
+pub fn convert_naive_to_utc_datetime(d: NaiveDateTime) -> DateTimeUtc {
+    DateTime::from_naive_utc_and_offset(d, Utc)
 }
 
 pub fn deserialize_date<'de, D>(deserializer: D) -> Result<NaiveDate, D::Error>
@@ -117,21 +166,38 @@ pub async fn sleep_for_n_seconds(sec: u64) {
     sleep(Duration::from_secs(sec)).await;
 }
 
-#[macro_export]
-macro_rules! ryot_log {
-    (info, $($arg:tt)*) => {
-        tracing::info!(target: "ryot", $($arg)*);
-    };
-    (warn, $($arg:tt)*) => {
-        tracing::warn!(target: "ryot", $($arg)*);
-    };
-    (error, $($arg:tt)*) => {
-        tracing::error!(target: "ryot", $($arg)*);
-    };
-    (debug, $($arg:tt)*) => {
-        tracing::debug!(target: "ryot", $($arg)*);
-    };
-    (trace, $($arg:tt)*) => {
-        tracing::trace!(target: "ryot", $($arg)*);
-    };
+pub fn generate_session_id(byte_length: Option<usize>) -> String {
+    let length = byte_length.unwrap_or(32);
+    let mut token_bytes = vec![0u8; length];
+    rng().fill_bytes(&mut token_bytes);
+    BASE32.encode(&token_bytes)
+}
+
+pub fn get_db_stmt(stmt: SelectStatement) -> Statement {
+    let (sql, values) = stmt.build(PostgresQueryBuilder {});
+    Statement::from_sql_and_values(DatabaseBackend::Postgres, sql, values)
+}
+
+pub fn get_first_max_index_by<T, F>(items: &[T], compare_fn: F) -> Option<usize>
+where
+    F: Fn(&T, &T) -> Ordering,
+{
+    items
+        .iter()
+        .enumerate()
+        .max_by(|(idx_a, a), (idx_b, b)| compare_fn(a, b).then_with(|| idx_b.cmp(idx_a)))
+        .map(|(idx, _)| idx)
+}
+
+pub fn get_base_http_client(headers: Option<Vec<(HeaderName, HeaderValue)>>) -> reqwest::Client {
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
+    for (header, value) in headers.unwrap_or_default().into_iter() {
+        req_headers.insert(header, value);
+    }
+    ClientBuilder::new()
+        .default_headers(req_headers)
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap()
 }

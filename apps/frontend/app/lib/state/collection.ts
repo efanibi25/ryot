@@ -1,9 +1,13 @@
-import { notifications } from "@mantine/notifications";
-import type { EntityLot } from "@ryot/generated/graphql/backend/graphql";
+import {
+	CollectionContentsDocument,
+	type EntityLot,
+	type Scalars,
+} from "@ryot/generated/graphql/backend/graphql";
 import { isEqual } from "@ryot/ts-utils";
 import { produce } from "immer";
 import { atom, useAtom } from "jotai";
 import { useLocation, useNavigate } from "react-router";
+import { clientGqlService } from "~/lib/shared/react-query";
 
 type Entity = { entityId: string; entityLot: EntityLot };
 
@@ -13,13 +17,14 @@ type Action = "remove" | "add";
 
 type BulkEditingCollectionData = {
 	action: Action;
-	locationStartedFrom: string;
-	collection: Collection;
-	entities: Array<Entity>;
 	isLoading: boolean;
+	collection: Collection;
+	locationStartedFrom: string;
+	targetEntities: Array<Entity>;
+	alreadyPresentEntities: Array<Entity>;
 };
 
-export type BulkAddEntities = () => Promise<Array<Entity>>;
+export type BulkEditEntitiesToCollection = () => Promise<Array<Entity>>;
 
 const bulkEditingCollectionAtom = atom<BulkEditingCollectionData | null>(null);
 
@@ -28,60 +33,106 @@ export const useBulkEditCollection = () => {
 	const location = useLocation();
 	const navigate = useNavigate();
 
-	const findIndex = (toFind: Entity) =>
-		(bec?.entities || []).findIndex((inHere) => isEqual(inHere, toFind));
+	const findIndex = (toFind: Entity, inside?: Entity[]) =>
+		(inside || []).findIndex((inHere) => isEqual(inHere, toFind));
 
-	const start = (collection: Collection, action: Action) => {
+	const start = async (collection: Collection, action: Action) => {
+		const result = await clientGqlService.request(CollectionContentsDocument, {
+			input: {
+				collectionId: collection.id,
+				search: { take: Number.MAX_SAFE_INTEGER },
+			},
+		});
 		setBec({
 			action,
 			collection,
-			entities: [],
 			isLoading: false,
+			targetEntities: [],
 			locationStartedFrom: location.pathname,
+			alreadyPresentEntities: result.collectionContents.response.results.items,
 		});
 	};
 
 	return {
 		start,
-		isAdded: (entity: Entity) => findIndex(entity) !== -1,
+		isAdded: (entity: Entity) => findIndex(entity, bec?.targetEntities) !== -1,
+		isAlreadyPresent: (entity: Entity) =>
+			findIndex(entity, bec?.alreadyPresentEntities) !== -1,
 		state: bec
 			? {
 					data: bec,
-					stop: (showNotification?: boolean) => {
-						if (showNotification)
-							notifications.show({
-								title: "Success",
-								message:
-									bec.action === "remove"
-										? "Items will be removed from the collection"
-										: "Items will be added to the collection",
-								color: "green",
-							});
+					stopLoading: () => setBec({ ...bec, isLoading: false }),
+					stop: () => {
 						setBec(null);
 						navigate(bec.locationStartedFrom);
 					},
-					add: (toAdd: Entity) => {
-						if (findIndex(toAdd) !== -1) return;
-						setBec(
-							produce(bec, (draft) => {
-								draft.entities.push(toAdd);
-							}),
-						);
-					},
-					bulkAdd: async (getEntities: BulkAddEntities) => {
+					bulkAdd: async (getEntities: BulkEditEntitiesToCollection) => {
 						setBec({ ...bec, isLoading: true });
 						const entities = await getEntities();
-						setBec({ ...bec, isLoading: false, entities });
+						setBec({ ...bec, isLoading: false, targetEntities: entities });
 					},
 					remove: (toRemove: Entity) => {
+						const index = findIndex(toRemove, bec.targetEntities);
+						if (index === -1) return;
 						setBec(
 							produce(bec, (draft) => {
-								draft.entities.splice(findIndex(toRemove), 1);
+								draft.targetEntities.splice(index, 1);
 							}),
 						);
 					},
-					stopLoading: () => setBec({ ...bec, isLoading: false }),
+					add: (toAdd: Entity) => {
+						if (findIndex(toAdd, bec.targetEntities) !== -1) return;
+						setBec(
+							produce(bec, (draft) => {
+								draft.targetEntities.push(toAdd);
+							}),
+						);
+					},
 				}
 			: (false as const),
 	};
+};
+
+export type CreateOrUpdateCollectionModalData = {
+	collectionId?: string;
+};
+
+const createOrUpdateCollectionModalAtom = atom<{
+	isOpen: boolean;
+	data: CreateOrUpdateCollectionModalData | null;
+}>({ isOpen: false, data: null });
+
+export const useCreateOrUpdateCollectionModal = () => {
+	const [modal, setModal] = useAtom(createOrUpdateCollectionModalAtom);
+
+	const open = (data: CreateOrUpdateCollectionModalData | null) => {
+		setModal({ isOpen: true, data });
+	};
+
+	const close = () => {
+		setModal({ isOpen: false, data: null });
+	};
+
+	return {
+		open,
+		close,
+		data: modal.data,
+		isOpen: modal.isOpen,
+	};
+};
+
+type EditEntityCollectionInformationData = {
+	entityId: string;
+	collectionId: string;
+	entityLot: EntityLot;
+	creatorUserId: string;
+	collectionName: string;
+	existingInformation: Scalars["JSON"]["input"];
+};
+
+const editEntityCollectionInformationAtom =
+	atom<EditEntityCollectionInformationData | null>(null);
+
+export const useEditEntityCollectionInformation = () => {
+	return useAtom(editEntityCollectionInformationAtom);
 };

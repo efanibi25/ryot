@@ -1,24 +1,24 @@
-use async_graphql::Result;
+use std::result::Result as StdResult;
+
+use anyhow::Result;
 use common_models::IdObject;
-use common_utils::{USER_AGENT_STR, ryot_log};
-use dependent_models::{ImportCompletedItem, ImportResult};
+use common_utils::get_base_http_client;
+use common_utils::ryot_log;
+use dependent_models::{CollectionToEntityDetails, ImportCompletedItem, ImportResult};
 use enum_models::{ImportSource, MediaLot, MediaSource};
+use futures::stream::{self, StreamExt};
 use media_models::{
     CreateOrUpdateCollectionInput, DeployUrlAndKeyImportInput, ImportOrExportItemRating,
     ImportOrExportItemReview, ImportOrExportMetadataItemSeen,
 };
-use providers::openlibrary::get_key;
-use reqwest::{
-    ClientBuilder,
-    header::{HeaderMap, HeaderValue, USER_AGENT},
-};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use openlibrary_provider::get_key;
+use reqwest::header::{HeaderName, HeaderValue};
+use rust_decimal::{Decimal, dec};
 use sea_orm::prelude::DateTimeUtc;
 use serde::{Deserialize, Serialize};
 use serde_with::{TimestampMilliSeconds, formats::Flexible, serde_as};
 
-use super::{ImportFailStep, ImportFailedItem, ImportOrExportMetadataItem};
+use crate::{ImportFailStep, ImportFailedItem, ImportOrExportMetadataItem};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -126,51 +126,44 @@ async fn get_item_details_with_source(
     client: &reqwest::Client,
     url: &str,
     item: &Item,
-    failed: &mut Vec<ImportFailedItem>,
-) -> Result<(ItemDetails, String, MediaSource, MediaLot), ()> {
+) -> StdResult<(ItemDetails, String, MediaSource, MediaLot), ImportFailedItem> {
     let Some(media_type) = item.media_type.as_ref() else {
-        failed.push(ImportFailedItem {
+        return Err(ImportFailedItem {
             identifier: item.id.to_string(),
             error: Some("No media type".to_string()),
             step: ImportFailStep::ItemDetailsFromSource,
             ..Default::default()
         });
-        return Err(());
     };
     let lot = MediaLot::from(media_type.clone());
     let rsp = client
         .get(format!("{}/details/{}", url, item.id))
         .send()
         .await
-        .unwrap();
-    let details: ItemDetails = match rsp.json().await {
-        Ok(s) => s,
-        Err(e) => {
-            ryot_log!(
-                debug,
-                "Encountered error for id = {id:?}: {e:?}",
-                id = item.id
-            );
-            let item = ImportFailedItem {
-                lot: Some(lot),
-                step: ImportFailStep::ItemDetailsFromSource,
-                identifier: item.id.to_string(),
-                error: Some(e.to_string()),
-            };
-            failed.push(item);
-            return Err(());
+        .map_err(|e| ImportFailedItem {
+            lot: Some(lot),
+            step: ImportFailStep::ItemDetailsFromSource,
+            identifier: item.id.to_string(),
+            error: Some(e.to_string()),
+        })?;
+    let details: ItemDetails = rsp.json().await.map_err(|e| {
+        ryot_log!(debug, "Error for id = {id:?}: {e:?}", id = item.id);
+        ImportFailedItem {
+            lot: Some(lot),
+            step: ImportFailStep::ItemDetailsFromSource,
+            identifier: item.id.to_string(),
+            error: Some(e.to_string()),
         }
-    };
+    })?;
     let (identifier, source) = match media_type {
         MediaType::Book => {
             if let Some(_g_id) = details.goodreads_id {
-                failed.push(ImportFailedItem {
+                return Err(ImportFailedItem {
                     lot: Some(lot),
                     step: ImportFailStep::ItemDetailsFromSource,
                     identifier: details.id.to_string(),
                     error: Some("Goodreads ID not supported".to_string()),
                 });
-                return Err(());
             } else {
                 (
                     get_key(&details.openlibrary_id.clone().unwrap()),
@@ -186,18 +179,86 @@ async fn get_item_details_with_source(
     Ok((details, identifier, source, lot))
 }
 
+async fn process_item(
+    idx: usize,
+    item: Item,
+    total: usize,
+    client: &reqwest::Client,
+    url: &str,
+) -> StdResult<ImportOrExportMetadataItem, ImportFailedItem> {
+    let (details, identifier, source, lot) =
+        get_item_details_with_source(client, url, &item).await?;
+
+    ryot_log!(
+        debug,
+        "Got details for {lot:?}, with {seen} seen history: {id} ({idx}/{total})",
+        lot = lot,
+        id = item.id,
+        idx = idx + 1,
+        total = total,
+        seen = details.seen_history.len()
+    );
+
+    let item = ImportOrExportMetadataItem {
+        lot,
+        source,
+        identifier,
+        source_id: item.id.to_string(),
+        reviews: Vec::from_iter(details.user_rating.map(|r| {
+            let review = if let Some(_s) = r.clone().review {
+                Some(ImportOrExportItemReview {
+                    date: r.date,
+                    text: r.review,
+                    spoiler: Some(false),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+            ImportOrExportItemRating {
+                review,
+                rating: r.rating.map(|d| d.saturating_mul(dec!(20))),
+                ..Default::default()
+            }
+        })),
+        seen_history: details
+            .seen_history
+            .iter()
+            .map(|s| {
+                let (season_number, episode_number) = if let Some(c) = s.episode_id {
+                    let episode = details
+                        .seasons
+                        .iter()
+                        .flat_map(|e| e.episodes.to_owned())
+                        .find(|e| e.id == c)
+                        .unwrap();
+                    (Some(episode.season_number), Some(episode.episode_number))
+                } else {
+                    (None, None)
+                };
+                ImportOrExportMetadataItemSeen {
+                    ended_on: s.date,
+                    show_season_number: season_number,
+                    show_episode_number: episode_number,
+                    providers_consumed_on: Some(vec![ImportSource::Mediatracker.to_string()]),
+                    ..Default::default()
+                }
+            })
+            .collect(),
+        ..Default::default()
+    };
+    Ok(item)
+}
+
 pub async fn import(input: DeployUrlAndKeyImportInput) -> Result<ImportResult> {
     let api_url = input.api_url.trim_end_matches('/');
-    let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
-    headers.insert("Access-Token", input.api_key.parse().unwrap());
-    let url = format!("{}/api", api_url);
-    let client = ClientBuilder::new()
-        .default_headers(headers)
-        .build()
-        .unwrap();
+    let url = format!("{api_url}/api");
+    let client = get_base_http_client(Some(vec![(
+        HeaderName::from_static("access-token"),
+        HeaderValue::from_str(&input.api_key).unwrap(),
+    )]));
 
-    let rsp = client.get(format!("{}/user", url)).send().await.unwrap();
+    let rsp = client.get(format!("{url}/user")).send().await.unwrap();
     let data = rsp.json::<IdObject>().await.unwrap();
 
     let user_id: i32 = data.id;
@@ -206,8 +267,8 @@ pub async fn import(input: DeployUrlAndKeyImportInput) -> Result<ImportResult> {
     let mut completed = vec![];
 
     let rsp = client
-        .get(format!("{}/lists", url))
-        .query(&serde_json::json!({ "userId": user_id }))
+        .get(format!("{url}/lists"))
+        .query(&[("userId", &user_id.to_string())])
         .send()
         .await
         .unwrap();
@@ -226,100 +287,51 @@ pub async fn import(input: DeployUrlAndKeyImportInput) -> Result<ImportResult> {
 
     for list in lists {
         let rsp = client
-            .get(format!("{}/list/items", url))
-            .query(&serde_json::json!({ "listId": list.id }))
+            .get(format!("{url}/list/items"))
+            .query(&[("listId", &list.id.to_string())])
             .send()
             .await
             .unwrap();
         let items: Vec<ListItemResponse> = rsp.json().await.unwrap();
         for d in items {
             let (_details, identifier, source, lot) =
-                match get_item_details_with_source(&client, &url, &d.media_item, &mut failed).await
-                {
+                match get_item_details_with_source(&client, &url, &d.media_item).await {
                     Ok(v) => v,
-                    Err(_) => continue,
+                    Err(error_item) => {
+                        failed.push(error_item);
+                        continue;
+                    }
                 };
             completed.push(ImportCompletedItem::Metadata(ImportOrExportMetadataItem {
                 lot,
                 source,
                 identifier,
-                collections: vec![list.name.clone()],
+                collections: vec![CollectionToEntityDetails {
+                    collection_name: list.name.clone(),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }));
         }
     }
 
     // all items returned here are seen at least once
-    let rsp = client.get(format!("{}/items", url)).send().await.unwrap();
+    let rsp = client.get(format!("{url}/items")).send().await.unwrap();
     let data: Vec<Item> = rsp.json().await.unwrap();
 
     let data_len = data.len();
 
-    for (idx, d) in data.into_iter().enumerate() {
-        let (details, identifier, source, lot) =
-            match get_item_details_with_source(&client, &url, &d, &mut failed).await {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-        ryot_log!(
-            debug,
-            "Got details for {lot:?}, with {seen} seen history: {id} ({idx}/{total})",
-            lot = lot,
-            id = d.id,
-            idx = idx,
-            total = data_len,
-            seen = details.seen_history.len()
-        );
+    let results: Vec<_> = stream::iter(data.into_iter().enumerate())
+        .map(|(idx, item)| process_item(idx, item, data_len, &client, &url))
+        .buffer_unordered(5)
+        .collect()
+        .await;
 
-        let item = ImportOrExportMetadataItem {
-            lot,
-            source,
-            identifier,
-            source_id: d.id.to_string(),
-            reviews: Vec::from_iter(details.user_rating.map(|r| {
-                let review = if let Some(_s) = r.clone().review {
-                    Some(ImportOrExportItemReview {
-                        date: r.date,
-                        text: r.review,
-                        spoiler: Some(false),
-                        ..Default::default()
-                    })
-                } else {
-                    None
-                };
-                ImportOrExportItemRating {
-                    review,
-                    rating: r.rating.map(|d| d.saturating_mul(dec!(20))),
-                    ..Default::default()
-                }
-            })),
-            seen_history: details
-                .seen_history
-                .iter()
-                .map(|s| {
-                    let (season_number, episode_number) = if let Some(c) = s.episode_id {
-                        let episode = details
-                            .seasons
-                            .iter()
-                            .flat_map(|e| e.episodes.to_owned())
-                            .find(|e| e.id == c)
-                            .unwrap();
-                        (Some(episode.season_number), Some(episode.episode_number))
-                    } else {
-                        (None, None)
-                    };
-                    ImportOrExportMetadataItemSeen {
-                        ended_on: s.date.map(|d| d.date_naive()),
-                        show_season_number: season_number,
-                        show_episode_number: episode_number,
-                        provider_watched_on: Some(ImportSource::Mediatracker.to_string()),
-                        ..Default::default()
-                    }
-                })
-                .collect(),
-            ..Default::default()
-        };
-        completed.push(ImportCompletedItem::Metadata(item));
+    for result in results {
+        match result {
+            Ok(item) => completed.push(ImportCompletedItem::Metadata(item)),
+            Err(error_item) => failed.push(error_item),
+        }
     }
 
     Ok(ImportResult { completed, failed })

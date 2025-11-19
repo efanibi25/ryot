@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
-use apalis::prelude::*;
+use apalis::prelude::{Data, Error};
 use apalis_cron::CronContext;
-use background_models::{HpApplicationJob, LpApplicationJob, MpApplicationJob, ScheduledJob};
+use background_models::{
+    HpApplicationJob, LpApplicationJob, MpApplicationJob, ScheduledJob, SingleApplicationJob,
+};
 use common_utils::ryot_log;
 use traits::TraceOk;
 
 use crate::common::AppServices;
 
-pub async fn run_background_jobs(
+pub async fn run_infrequent_cron_jobs(
     _information: ScheduledJob,
     ctx: CronContext<chrono_tz::Tz>,
     app_services: Data<Arc<AppServices>>,
@@ -22,7 +24,7 @@ pub async fn run_background_jobs(
     Ok(())
 }
 
-pub async fn run_frequent_jobs(
+pub async fn run_frequent_cron_jobs(
     _information: ScheduledJob,
     ctx: CronContext<chrono_tz::Tz>,
     app_services: Data<Arc<AppServices>>,
@@ -36,6 +38,16 @@ pub async fn run_frequent_jobs(
     app_services
         .fitness_service
         .process_users_scheduled_for_workout_revision()
+        .await
+        .trace_ok();
+    app_services
+        .miscellaneous_service
+        .invalidate_import_jobs()
+        .await
+        .trace_ok();
+    app_services
+        .miscellaneous_service
+        .cleanup_user_and_metadata_association()
         .await
         .trace_ok();
     Ok(())
@@ -68,14 +80,24 @@ pub async fn perform_hp_application_job(
                 .handle_review_posted_event(event)
                 .await
         }
-        HpApplicationJob::BulkProgressUpdate(user_id, input) => {
+        HpApplicationJob::BulkMetadataProgressUpdate(user_id, input) => {
             app_services
                 .miscellaneous_service
-                .bulk_progress_update(user_id, input)
+                .bulk_metadata_progress_update(user_id, input)
                 .await
         }
+        HpApplicationJob::AddEntitiesToCollection(user_id, input) => app_services
+            .collection_service
+            .add_entities_to_collection(&user_id, input)
+            .await
+            .map(|_| ()),
+        HpApplicationJob::RemoveEntitiesFromCollection(user_id, input) => app_services
+            .collection_service
+            .remove_entities_from_collection(&user_id, input)
+            .await
+            .map(|_| ()),
     };
-    status.map_err(|e| Error::Failed(Arc::new(e.message.into())))
+    status.map_err(|e| Error::Failed(Arc::new(e.to_string().into())))
 }
 
 pub async fn perform_mp_application_job(
@@ -111,17 +133,11 @@ pub async fn perform_mp_application_job(
         MpApplicationJob::UpdateMetadataGroup(metadata_group_id) => {
             app_services
                 .miscellaneous_service
-                .update_metadata_group_and_notify_users(metadata_group_id)
+                .update_metadata_group_and_notify_users(&metadata_group_id)
                 .await
         }
         MpApplicationJob::UpdateGithubExercises => {
             app_services.fitness_service.update_github_exercises().await
-        }
-        MpApplicationJob::RecalculateCalendarEvents => {
-            app_services
-                .miscellaneous_service
-                .recalculate_calendar_events()
-                .await
         }
         MpApplicationJob::PerformBackgroundTasks => {
             app_services
@@ -145,7 +161,7 @@ pub async fn perform_mp_application_job(
                 .await
         }
     };
-    status.map_err(|e| Error::Failed(Arc::new(e.message.into())))
+    status.map_err(|e| Error::Failed(Arc::new(e.to_string().into())))
 }
 
 pub async fn perform_lp_application_job(
@@ -154,12 +170,6 @@ pub async fn perform_lp_application_job(
 ) -> Result<(), Error> {
     ryot_log!(trace, "Started job {:?}", information);
     let status = match information {
-        LpApplicationJob::HandleAfterMediaSeenTasks(seen) => {
-            app_services
-                .miscellaneous_service
-                .handle_after_media_seen_tasks(seen)
-                .await
-        }
         LpApplicationJob::HandleEntityAddedToCollectionEvent(collection_to_entity_id) => {
             app_services
                 .integration_service
@@ -183,6 +193,27 @@ pub async fn perform_lp_application_job(
                 .update_user_last_activity_performed(user_id, timestamp)
                 .await
         }
+        LpApplicationJob::HandleMetadataEligibleForSmartCollectionMoving(metadata_id) => {
+            app_services
+                .miscellaneous_service
+                .handle_metadata_eligible_for_smart_collection_moving(metadata_id)
+                .await
+        }
     };
-    status.map_err(|e| Error::Failed(Arc::new(e.message.into())))
+    status.map_err(|e| Error::Failed(Arc::new(e.to_string().into())))
+}
+
+pub async fn perform_single_application_job(
+    information: SingleApplicationJob,
+    app_services: Data<Arc<AppServices>>,
+) -> Result<(), Error> {
+    ryot_log!(trace, "Started job {:?}", information);
+    let status = match information {
+        SingleApplicationJob::ProcessIntegrationWebhook(integration_slug, payload) => app_services
+            .integration_service
+            .process_integration_webhook(integration_slug, payload)
+            .await
+            .map(|_| ()),
+    };
+    status.map_err(|e| Error::Failed(Arc::new(e.to_string().into())))
 }

@@ -1,5 +1,9 @@
 # Contributing
 
+:::info
+`AGENTS.md` is an excellent place to start reading on coding conventions followed in this project.
+:::
+
 - Install [Rust](https://www.rust-lang.org), [Moon](https://moonrepo.dev) and
   [Caddy](https://caddyserver.com/) (>= 2.7).
 - Make sure you have PostgreSQL installed and running. I prefer using Docker e.g.
@@ -8,11 +12,8 @@
 
   ```bash title=".env"
   DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
-  DEFAULT_TMDB_ACCESS_TOKEN=your-tmdb-access-token
-  DEFAULT_MAL_CLIENT_ID=your-mal-client-id
-  TRAKT_CLIENT_ID=your-trakt-client-id
-  UNKEY_API_ID=dummy-api-id
-  APP_VERSION=v5.2.1
+  UNKEY_ROOT_KEY=dummy-root-key
+  APP_VERSION=v9.2.2
   ```
 
 - Run the following commands in separate terminals:

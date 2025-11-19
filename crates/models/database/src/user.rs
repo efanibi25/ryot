@@ -4,15 +4,13 @@ use argon2::{
     Argon2, PasswordHasher,
     password_hash::{SaltString, rand_core::OsRng},
 };
-use async_graphql::SimpleObject;
 use async_trait::async_trait;
 use enum_models::UserLot;
 use sea_orm::{ActiveValue, entity::prelude::*};
 use serde::{Deserialize, Serialize};
-use user_models::{UserExtraInformation, UserPreferences};
+use user_models::{UserExtraInformation, UserPreferences, UserTwoFactorInformation};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize, SimpleObject)]
-#[graphql(name = "User")]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "user")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -20,16 +18,14 @@ pub struct Model {
     pub name: String,
     pub lot: UserLot,
     pub created_on: DateTimeUtc,
-    pub is_disabled: Option<bool>,
-    #[graphql(skip)]
     pub password: Option<String>,
+    pub is_disabled: Option<bool>,
     pub preferences: UserPreferences,
     pub oidc_issuer_id: Option<String>,
-    #[graphql(skip)]
     pub last_login_on: Option<DateTimeUtc>,
-    #[graphql(skip)]
     pub last_activity_on: Option<DateTimeUtc>,
     pub extra_information: Option<UserExtraInformation>,
+    pub two_factor_information: Option<UserTwoFactorInformation>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -48,8 +44,12 @@ pub enum Relation {
     Integration,
     #[sea_orm(has_many = "super::metadata::Entity")]
     Metadata,
+    #[sea_orm(has_many = "super::metadata_group::Entity")]
+    MetadataGroup,
     #[sea_orm(has_many = "super::notification_platform::Entity")]
     NotificationPlatform,
+    #[sea_orm(has_many = "super::person::Entity")]
+    Person,
     #[sea_orm(has_many = "super::review::Entity")]
     Review,
     #[sea_orm(has_many = "super::seen::Entity")]
@@ -157,7 +157,7 @@ impl ActiveModelBehavior for ActiveModel {
         if self.password.is_set() {
             let cloned_password = self.password.clone().unwrap();
             if let Some(password) = cloned_password {
-                let salt = SaltString::generate(&mut OsRng);
+                let salt = SaltString::try_from_rng(&mut OsRng).unwrap();
                 let password_hash = Argon2::default()
                     .hash_password(password.as_bytes(), &salt)
                     .map_err(|_| DbErr::Custom("Unable to hash password".to_owned()))?

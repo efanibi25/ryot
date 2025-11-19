@@ -63,24 +63,23 @@ import { ProRequiredAlert } from "~/components/common";
 import {
 	displayDistanceWithUnit,
 	displayWeightWithUnit,
-} from "~/components/fitness";
+} from "~/components/fitness/utils";
+import { PRO_REQUIRED_MESSAGE } from "~/lib/shared/constants";
 import {
-	ApplicationTimeRange,
-	MediaColors,
-	PRO_REQUIRED_MESSAGE,
-	clientGqlService,
 	convertUtcHourToLocalHour,
 	dayjsLib,
 	getStartTimeFromRange,
-	queryFactory,
-	selectRandomElement,
-} from "~/lib/common";
+} from "~/lib/shared/date-utils";
 import {
 	useCoreDetails,
 	useGetMantineColors,
 	useUserPreferences,
 	useUserUnitSystem,
-} from "~/lib/hooks";
+} from "~/lib/shared/hooks";
+import { MediaColors } from "~/lib/shared/media-utils";
+import { clientGqlService, queryFactory } from "~/lib/shared/react-query";
+import { selectRandomElement } from "~/lib/shared/ui-utils";
+import { ApplicationTimeRange } from "~/lib/types";
 import { serverGqlService } from "~/lib/utilities.server";
 import type { Route } from "./+types/_dashboard.analytics";
 
@@ -113,7 +112,7 @@ const useTimeSpanSettings = () => {
 	const startDate =
 		timeSpanSettings.startDate ||
 		(timeSpanSettings.range === "All Time" &&
-			loaderData.userAnalyticsParameters.startDate) ||
+			loaderData.userAnalyticsParameters.response.startDate) ||
 		formatDateToNaiveDate(
 			getStartTimeFromRange(timeSpanSettings.range) || new Date(),
 		);
@@ -121,7 +120,7 @@ const useTimeSpanSettings = () => {
 	const endDate =
 		timeSpanSettings.endDate ||
 		(timeSpanSettings.range === "All Time" &&
-			loaderData.userAnalyticsParameters.endDate) ||
+			loaderData.userAnalyticsParameters.response.endDate) ||
 		formatDateToNaiveDate(dayjsLib());
 	return { timeSpanSettings, setTimeSpanSettings, startDate, endDate };
 };
@@ -131,11 +130,11 @@ const useGetUserAnalytics = () => {
 	const input = { dateRange: { startDate, endDate } };
 
 	const { data: userAnalytics } = useQuery({
-		queryKey: queryFactory.miscellaneous.userAnalytics({ input }).queryKey,
+		queryKey: queryFactory.miscellaneous.userAnalytics(input).queryKey,
 		queryFn: async () => {
 			return await clientGqlService
 				.request(UserAnalyticsDocument, { input })
-				.then((data) => data.userAnalytics);
+				.then((data) => data.userAnalytics.response);
 		},
 	});
 	return userAnalytics;
@@ -264,19 +263,30 @@ export default function Page() {
 							if (!current) return;
 							setIsCaptureLoading(true);
 							setTimeout(async () => {
+								let downloadUrl: string | undefined;
+								let anchor: HTMLAnchorElement | undefined;
 								try {
-									const canvasPromise = await html2canvas(current);
-									const dataURL = canvasPromise.toDataURL("image/png");
-									const img = new Image();
-									img.setAttribute("src", dataURL);
-									img.setAttribute("download", dataURL);
-									const a = document.createElement("a");
-									a.setAttribute("download", dataURL);
-									a.setAttribute("href", img.src);
-									a.setAttribute("target", "_blank");
-									a.innerHTML = "DOWNLOAD";
-									document.body.appendChild(a);
-									a.click();
+									const canvas = await html2canvas(current);
+									const dataUrl = canvas.toDataURL("image/png");
+									let blob: Blob;
+									if (canvas.toBlob) {
+										blob = await new Promise<Blob>((resolve, reject) => {
+											canvas.toBlob((value) => {
+												if (value) return resolve(value);
+												reject(new Error("Failed to create canvas blob"));
+											}, "image/png");
+										});
+									} else {
+										blob = await fetch(dataUrl).then((response) =>
+											response.blob(),
+										);
+									}
+									downloadUrl = URL.createObjectURL(blob);
+									anchor = document.createElement("a");
+									anchor.href = downloadUrl;
+									anchor.download = "download.png";
+									document.body.appendChild(anchor);
+									anchor.click();
 								} catch {
 									notifications.show({
 										color: "red",
@@ -284,6 +294,8 @@ export default function Page() {
 										message: "Something went wrong while capturing the image",
 									});
 								} finally {
+									if (anchor) anchor.remove();
+									if (downloadUrl) URL.revokeObjectURL(downloadUrl);
 									setIsCaptureLoading(false);
 								}
 							}, 1500);
@@ -452,10 +464,10 @@ const CustomDateSelectModal = (props: {
 					w="fit-content"
 					onChange={setValue}
 					minDate={dayjsLib(
-						loaderData.userAnalyticsParameters.startDate,
+						loaderData.userAnalyticsParameters.response.startDate,
 					).toDate()}
 					maxDate={dayjsLib(
-						loaderData.userAnalyticsParameters.endDate,
+						loaderData.userAnalyticsParameters.response.endDate,
 					).toDate()}
 				/>
 				<Button
@@ -726,7 +738,7 @@ type ChartContainerProps = {
 	disableCounter?: boolean;
 	children: (
 		count: number,
-		data: UserAnalyticsQuery["userAnalytics"],
+		data: UserAnalyticsQuery["userAnalytics"]["response"],
 	) => {
 		render: ReactNode;
 		totalItems: number;

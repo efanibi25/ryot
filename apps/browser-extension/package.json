@@ -1,0 +1,26 @@
+{
+	"name": "@ryot/browser-extension",
+	"private": true,
+	"type": "module",
+	"version": "0.1.0",
+	"devDependencies": {
+		"@types/react": "19.2.2",
+		"@types/react-dom": "19.2.2",
+		"@wxt-dev/auto-icons": "1.1.0",
+		"@wxt-dev/module-react": "1.1.5",
+		"vite-tsconfig-paths": "5.1.4",
+		"wxt": "0.20.11"
+	},
+	"dependencies": {
+		"@ryot/generated": "workspace:*",
+		"@ryot/ts-utils": "workspace:*",
+		"@tailwindcss/vite": "4.1.17",
+		"graphql": "16.12.0",
+		"graphql-request": "7.3.1",
+		"lucide-react": "0.553.0",
+		"react": "19.2.0",
+		"react-dom": "19.2.0",
+		"tailwindcss": "4.1.17",
+		"ts-pattern": "5.9.0"
+	}
+}

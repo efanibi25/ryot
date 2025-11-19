@@ -1,25 +1,30 @@
 use std::{collections::HashMap, sync::Arc};
 
-use async_graphql::Result;
+use anyhow::Result;
 use background_models::{ApplicationJob, MpApplicationJob};
-use chrono::{DateTime, Duration, NaiveDateTime, Offset, TimeZone, Utc};
+use chrono::{Duration, NaiveDateTime, Offset, TimeZone, Utc};
 use common_models::BackgroundJob;
 use common_utils::{MAX_IMPORT_RETRIES_FOR_PARTIAL_STATE, ryot_log};
 use database_models::{
     exercise, import_report,
     prelude::{Exercise, ImportReport},
 };
-use dependent_utils::{
-    deploy_background_job, generate_exercise_id, get_google_books_service, get_hardcover_service,
-    get_openlibrary_service, get_tmdb_non_media_service, process_import,
+use dependent_fitness_utils::generate_exercise_id;
+use dependent_import_utils::process_import;
+use dependent_jobs_utils::deploy_background_job;
+use dependent_models::ImportOrExportMetadataItem;
+use dependent_provider_utils::{
+    get_google_books_service, get_hardcover_service, get_openlibrary_service,
+    get_tmdb_non_media_service,
 };
 use enum_models::ImportSource;
 use enum_models::{ExerciseLot, ExerciseSource};
 use importer_models::{ImportFailStep, ImportFailedItem};
-use media_models::{DeployImportJobInput, ImportOrExportMetadataItem};
-use rust_decimal_macros::dec;
+use media_models::DeployImportJobInput;
+use rust_decimal::dec;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, prelude::Expr,
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, prelude::DateTimeUtc, prelude::Expr,
 };
 use supporting_service::SupportingService;
 use traits::TraceOk;
@@ -28,6 +33,8 @@ mod anilist;
 mod audiobookshelf;
 mod generic_json;
 mod goodreads;
+mod grouvee;
+mod hardcover;
 mod hevy;
 mod igdb;
 mod imdb;
@@ -35,6 +42,7 @@ mod jellyfin;
 mod mediatracker;
 mod movary;
 mod myanimelist;
+mod netflix;
 mod open_scale;
 mod plex;
 mod storygraph;
@@ -62,8 +70,7 @@ impl ImporterService {
             .filter(import_report::Column::UserId.eq(user_id))
             .order_by_desc(import_report::Column::StartedOn)
             .all(&self.0.db)
-            .await
-            .unwrap();
+            .await?;
         Ok(reports)
     }
 
@@ -80,34 +87,57 @@ impl ImporterService {
             estimated_finish_time: ActiveValue::Set(import_started_at + Duration::hours(1)),
             ..Default::default()
         };
-        let db_import_job = model.insert(&self.0.db).await.unwrap();
+        let db_import_job = model.insert(&self.0.db).await?;
         let import_id = db_import_job.id.clone();
         ryot_log!(debug, "Started import job with id {import_id}");
         let maybe_import = match input.source {
-            ImportSource::Anilist => anilist::import(input.generic_json.unwrap(), &self.0).await,
+            ImportSource::Igdb => igdb::import(input.igdb.unwrap()).await,
+            ImportSource::Movary => movary::import(input.movary.unwrap()).await,
+            ImportSource::Plex => plex::import(input.url_and_key.unwrap()).await,
+            ImportSource::Jellyfin => jellyfin::import(input.jellyfin.unwrap()).await,
+            ImportSource::Myanimelist => myanimelist::import(input.mal.unwrap()).await,
+            ImportSource::Grouvee => grouvee::import(input.generic_csv.unwrap()).await,
+            ImportSource::GenericJson => generic_json::import(input.path.unwrap()).await,
+            ImportSource::Hardcover => hardcover::import(input.generic_csv.unwrap()).await,
+            ImportSource::Netflix => netflix::import(input.netflix.unwrap(), &self.0).await,
+            ImportSource::Anilist => anilist::import(input.path.unwrap(), &self.0).await,
+            ImportSource::Mediatracker => mediatracker::import(input.url_and_key.unwrap()).await,
+            ImportSource::Hevy => hevy::import(input.generic_csv.unwrap(), &self.0, &user_id).await,
+            ImportSource::OpenScale => {
+                open_scale::import(input.generic_csv.unwrap(), &self.0.timezone).await
+            }
             ImportSource::StrongApp => {
                 strong_app::import(input.strong_app.unwrap(), &self.0, &user_id).await
             }
-            ImportSource::Hevy => hevy::import(input.generic_csv.unwrap(), &self.0, &user_id).await,
-            ImportSource::Mediatracker => mediatracker::import(input.url_and_key.unwrap()).await,
-            ImportSource::Myanimelist => myanimelist::import(input.mal.unwrap()).await,
-            ImportSource::Goodreads => {
-                goodreads::import(
-                    input.generic_csv.unwrap(),
-                    &get_hardcover_service(&self.0.config).await.unwrap(),
-                    &get_google_books_service(&self.0.config).await.unwrap(),
-                    &get_openlibrary_service(&self.0.config).await.unwrap(),
+            ImportSource::Trakt => {
+                trakt::import(
+                    input.trakt.unwrap(),
+                    self.0.config.server.importer.trakt_client_id.as_str(),
                 )
                 .await
             }
-            ImportSource::Trakt => trakt::import(input.trakt.unwrap()).await,
-            ImportSource::Movary => movary::import(input.movary.unwrap()).await,
+            ImportSource::Imdb => {
+                imdb::import(
+                    input.generic_csv.unwrap(),
+                    &get_tmdb_non_media_service(&self.0).await?,
+                )
+                .await
+            }
+            ImportSource::Goodreads => {
+                goodreads::import(
+                    input.generic_csv.unwrap(),
+                    &get_hardcover_service(&self.0.config).await?,
+                    &get_google_books_service(&self.0.config).await?,
+                    &get_openlibrary_service(&self.0.config).await?,
+                )
+                .await
+            }
             ImportSource::Storygraph => {
                 storygraph::import(
                     input.generic_csv.unwrap(),
-                    &get_hardcover_service(&self.0.config).await.unwrap(),
-                    &get_google_books_service(&self.0.config).await.unwrap(),
-                    &get_openlibrary_service(&self.0.config).await.unwrap(),
+                    &get_hardcover_service(&self.0.config).await?,
+                    &get_google_books_service(&self.0.config).await?,
+                    &get_openlibrary_service(&self.0.config).await?,
                 )
                 .await
             }
@@ -115,28 +145,14 @@ impl ImporterService {
                 audiobookshelf::import(
                     input.url_and_key.unwrap(),
                     &self.0,
-                    &get_hardcover_service(&self.0.config).await.unwrap(),
-                    &get_google_books_service(&self.0.config).await.unwrap(),
-                    &get_openlibrary_service(&self.0.config).await.unwrap(),
+                    &get_hardcover_service(&self.0.config).await?,
+                    &get_google_books_service(&self.0.config).await?,
+                    &get_openlibrary_service(&self.0.config).await?,
                 )
                 .await
             }
-            ImportSource::Igdb => igdb::import(input.igdb.unwrap()).await,
-            ImportSource::Imdb => {
-                imdb::import(
-                    input.generic_csv.unwrap(),
-                    &get_tmdb_non_media_service(&self.0).await.unwrap(),
-                )
-                .await
-            }
-            ImportSource::GenericJson => generic_json::import(input.generic_json.unwrap()).await,
-            ImportSource::OpenScale => {
-                open_scale::import(input.generic_csv.unwrap(), &self.0.timezone).await
-            }
-            ImportSource::Jellyfin => jellyfin::import(input.jellyfin.unwrap()).await,
-            ImportSource::Plex => plex::import(input.url_and_key.unwrap()).await,
         };
-        let mut model: import_report::ActiveModel = db_import_job.into();
+        let mut model = db_import_job.into_active_model();
         match maybe_import {
             Ok(import) => {
                 let mut quick_update_model = model.clone();
@@ -148,7 +164,7 @@ impl ImporterService {
                         + Duration::seconds((import.completed.len() * each_item) as i64),
                 );
                 quick_update_model.update(&self.0.db).await?;
-                match process_import(&user_id, false, import, &self.0, |progress| {
+                match process_import(true, &user_id, import, &self.0, |progress| {
                     let id = import_id.clone();
                     async move {
                         ImportReport::update_many()
@@ -197,13 +213,13 @@ pub mod utils {
     pub fn get_date_time_with_offset(
         date_time: NaiveDateTime,
         timezone: &chrono_tz::Tz,
-    ) -> DateTime<Utc> {
+    ) -> DateTimeUtc {
         let offset = timezone
             .offset_from_utc_datetime(&Utc::now().naive_utc())
             .fix()
             .local_minus_utc();
         let offset = Duration::try_seconds(offset.into()).unwrap();
-        DateTime::<Utc>::from_naive_utc_and_offset(date_time, Utc) - offset
+        DateTimeUtc::from_naive_utc_and_offset(date_time, Utc) - offset
     }
 
     pub async fn associate_with_existing_or_new_exercise(

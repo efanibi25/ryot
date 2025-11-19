@@ -5,14 +5,15 @@ use application_utils::{get_current_date, get_current_time};
 use chrono::{Duration, NaiveDate, NaiveDateTime, Offset, Utc};
 use chrono_tz::Tz;
 use common_models::{UserLevelCacheKey, YoutubeMusicSongListened};
-use common_utils::{TEMPORARY_DIRECTORY, ryot_log};
+use common_utils::{get_temporary_directory, ryot_log};
 use dependent_models::{
-    ApplicationCacheKey, ApplicationCacheValue, ImportCompletedItem, ImportResult,
+    ApplicationCacheKey, ApplicationCacheValue, ImportCompletedItem, ImportOrExportMetadataItem,
+    ImportResult,
 };
 use enum_models::{MediaLot, MediaSource};
 use itertools::Itertools;
-use media_models::{ImportOrExportMetadataItem, ImportOrExportMetadataItemSeen};
-use rust_decimal_macros::dec;
+use media_models::ImportOrExportMetadataItemSeen;
+use rust_decimal::dec;
 use rustypipe::client::RustyPipe;
 use supporting_service::SupportingService;
 
@@ -54,7 +55,7 @@ pub async fn yank_progress(
         end_of_day.signed_duration_since(current_time) <= Duration::minutes(THRESHOLD_MINUTES);
 
     let client = RustyPipe::builder()
-        .storage_dir(TEMPORARY_DIRECTORY)
+        .storage_dir(get_temporary_directory())
         .timezone(&timezone, get_offset(&timezone))
         .build()?;
     client.user_auth_set_cookie(auth_cookie).await?;
@@ -87,9 +88,7 @@ pub async fn yank_progress(
             )
         })
         .collect::<HashMap<_, _>>();
-    let items_in_cache = ss
-        .cache_service
-        .get_values(cache_keys.values().cloned().collect())
+    let items_in_cache = cache_service::get_values(ss, cache_keys.values().cloned().collect())
         .await
         .unwrap_or_default()
         .into_iter()
@@ -119,9 +118,8 @@ pub async fn yank_progress(
                 identifier: song_id,
                 lot: MediaLot::Music,
                 seen_history: vec![ImportOrExportMetadataItemSeen {
-                    ended_on: Some(date),
                     progress: Some(progress),
-                    provider_watched_on: Some("Youtube Music".to_owned()),
+                    providers_consumed_on: Some(vec!["Youtube Music".to_owned()]),
                     ..Default::default()
                 }],
                 source: MediaSource::YoutubeMusic,
@@ -129,6 +127,6 @@ pub async fn yank_progress(
             }));
         items_to_cache.push((cache_key.to_owned(), cache_value));
     }
-    ss.cache_service.set_keys(items_to_cache).await.ok();
+    cache_service::set_keys(ss, items_to_cache).await.ok();
     Ok(result)
 }

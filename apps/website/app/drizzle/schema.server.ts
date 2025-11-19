@@ -1,7 +1,8 @@
 import {
+	bigint,
 	boolean,
-	date,
 	pgEnum,
+	pgSequence,
 	pgTable,
 	text,
 	timestamp,
@@ -27,26 +28,45 @@ export const PlanTypes = z.enum(planTypes.enumValues);
 export type TPlanTypes = z.infer<typeof PlanTypes>;
 
 export const customers = pgTable("customer", {
-	id: uuid("id").notNull().primaryKey().defaultRandom(),
+	unkeyKeyId: text("unkey_key_id"),
+	ryotUserId: text("ryot_user_id"),
 	email: text("email").notNull().unique(),
+	oidcIssuerId: text("oidc_issuer_id").unique(),
+	id: uuid("id").notNull().primaryKey().defaultRandom(),
+	paddleCustomerId: text("paddle_customer_id").unique(),
 	createdOn: timestamp("created_on", { withTimezone: true })
 		.defaultNow()
 		.notNull(),
-	oidcIssuerId: text("oidc_issuer_id").unique(),
-	paddleCustomerId: text("paddle_customer_id").unique(),
-	productType: productTypes("product_type"),
-	planType: planTypes("plan_type"),
-	renewOn: date("renew_on"),
-	unkeyKeyId: text("unkey_key_id"),
-	ryotUserId: text("ryot_user_id"),
-	hasCancelled: boolean("has_cancelled"),
+});
+
+export const ticketNumberSequence = pgSequence("ticket_number_seq", {
+	startWith: 1,
+	increment: 1,
 });
 
 export const contactSubmissions = pgTable("contact_submission", {
-	id: uuid("id").defaultRandom().primaryKey(),
-	createdAt: timestamp("created_at").defaultNow().notNull(),
+	isSpam: boolean("is_spam"),
 	email: text("email").notNull(),
 	message: text("message").notNull(),
-	isSpam: boolean("is_spam"),
 	isAddressed: boolean("is_addressed"),
+	id: uuid("id").defaultRandom().primaryKey(),
+	createdAt: timestamp("created_at").defaultNow().notNull(),
+	ticketNumber: bigint("ticket_number", { mode: "bigint" }),
+});
+
+export const customerPurchases = pgTable("customer_purchase", {
+	planType: planTypes("plan_type").notNull(),
+	productType: productTypes("product_type").notNull(),
+	id: uuid("id").notNull().primaryKey().defaultRandom(),
+	renewOn: timestamp("renew_on", { withTimezone: true }),
+	cancelledOn: timestamp("cancelled_on", { withTimezone: true }),
+	customerId: uuid("customer_id")
+		.notNull()
+		.references(() => customers.id),
+	createdOn: timestamp("created_on", { withTimezone: true })
+		.defaultNow()
+		.notNull(),
+	updatedOn: timestamp("updated_on", { withTimezone: true })
+		.defaultNow()
+		.notNull(),
 });

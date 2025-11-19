@@ -26,7 +26,6 @@ import {
 import { notifications } from "@mantine/notifications";
 import {
 	DashboardElementLot,
-	GridPacking,
 	MediaLot,
 	UpdateUserPreferenceDocument,
 	type UserPreferences,
@@ -43,30 +42,30 @@ import {
 	snakeCase,
 	startCase,
 } from "@ryot/ts-utils";
-import { IconCheckbox, IconMinus } from "@tabler/icons-react";
 import {
 	IconAlertCircle,
-	IconBellRinging,
+	IconCheckbox,
 	IconGripVertical,
+	IconMinus,
 } from "@tabler/icons-react";
 import { useMutation } from "@tanstack/react-query";
 import { type Draft, produce } from "immer";
 import { Fragment, useState } from "react";
-import { useLoaderData, useRevalidator } from "react-router";
+import { useLoaderData } from "react-router";
 import { $path } from "safe-routes";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import {
-	FitnessEntity,
-	PRO_REQUIRED_MESSAGE,
-	clientGqlService,
-} from "~/lib/common";
+import { PRO_REQUIRED_MESSAGE } from "~/lib/shared/constants";
 import {
 	useCoreDetails,
 	useDashboardLayoutData,
+	useInvalidateUserDetails,
 	useIsFitnessActionActive,
 	useUserPreferences,
-} from "~/lib/hooks";
+} from "~/lib/shared/hooks";
+import { clientGqlService } from "~/lib/shared/react-query";
+import { convertEnumToSelectData } from "~/lib/shared/ui-utils";
+import { FitnessEntity } from "~/lib/types";
 import classes from "~/styles/preferences.module.css";
 import type { Route } from "./+types/_dashboard.settings.preferences";
 
@@ -118,15 +117,15 @@ const notificationContent = {
 type UpdatePreferenceFunc = (draft: Draft<UserPreferences>) => void;
 
 export default function Page() {
-	const loaderData = useLoaderData<typeof loader>();
 	const coreDetails = useCoreDetails();
 	const userPreferences = useUserPreferences();
-	const revalidator = useRevalidator();
+	const loaderData = useLoaderData<typeof loader>();
 	const isFitnessActionActive = useIsFitnessActionActive();
 	const [defaultTab, setDefaultTab] = useState(
 		loaderData.query.defaultTab || "dashboard",
 	);
 	const dashboardData = useDashboardLayoutData();
+	const invalidateUserDetails = useInvalidateUserDetails();
 	const [changingUserPreferences, setChangingUserPreferences] = useState({
 		isChanged: false,
 		value: userPreferences,
@@ -138,8 +137,7 @@ export default function Page() {
 			await clientGqlService.request(UpdateUserPreferenceDocument, {
 				input: changingUserPreferences.value,
 			});
-			await new Promise((r) => setTimeout(r, 1000));
-			revalidator.revalidate();
+			await invalidateUserDetails();
 		},
 	});
 
@@ -161,26 +159,41 @@ export default function Page() {
 						right: rem(isFitnessActionActive ? 100 : 40),
 					}}
 				>
-					<Button
-						color="green"
-						variant="outline"
-						leftSection={<IconCheckbox size={20} />}
-						loading={updateUserPreferencesMutation.isPending}
-						onClick={async () => {
-							await updateUserPreferencesMutation.mutateAsync();
-							notifications.show({
-								color: "green",
-								title: "Preferences updated",
-								message: "Preferences have been updated.",
-							});
-							setChangingUserPreferences({
-								isChanged: false,
-								value: userPreferences,
-							});
-						}}
-					>
-						Save changes
-					</Button>
+					<Group gap="xs">
+						<Button
+							variant="outline"
+							color="red"
+							disabled={updateUserPreferencesMutation.isPending}
+							onClick={() => {
+								setChangingUserPreferences({
+									isChanged: false,
+									value: userPreferences,
+								});
+							}}
+						>
+							Cancel changes
+						</Button>
+						<Button
+							color="green"
+							variant="outline"
+							leftSection={<IconCheckbox size={20} />}
+							loading={updateUserPreferencesMutation.isPending}
+							onClick={async () => {
+								await updateUserPreferencesMutation.mutateAsync();
+								notifications.show({
+									color: "green",
+									title: "Preferences updated",
+									message: "Preferences have been updated.",
+								});
+								setChangingUserPreferences({
+									isChanged: false,
+									value: userPreferences,
+								});
+							}}
+						>
+							Save changes
+						</Button>
+					</Group>
 				</Affix>
 			) : null}
 			<Stack>
@@ -276,6 +289,7 @@ export default function Page() {
 											</SimpleGrid>
 											{facet === "media" ? (
 												<MultiSelect
+													disabled={!!isEditDisabled}
 													defaultValue={
 														userPreferences.featuresEnabled[facet].specific
 													}
@@ -310,7 +324,6 @@ export default function Page() {
 										"disableVideos",
 										"disableReviews",
 										"disableWatchProviders",
-										"persistQueries",
 										"showSpoilersInCalendar",
 									] as const
 								).map((name) => (
@@ -342,11 +355,6 @@ export default function Page() {
 											.with(
 												"disableWatchProviders",
 												() => 'Do not display the "Watch On" tab',
-											)
-											.with(
-												"persistQueries",
-												() =>
-													"Persist queries in the URL so that you look at the same data next time you visit it",
 											)
 											.with(
 												"showSpoilersInCalendar",
@@ -407,38 +415,12 @@ export default function Page() {
 										size="xs"
 										fullWidth
 										disabled={!!isEditDisabled}
+										data={convertEnumToSelectData(UserReviewScale)}
 										defaultValue={userPreferences.general.reviewScale}
-										data={Object.values(UserReviewScale).map((c) => ({
-											value: c,
-											label: startCase(snakeCase(c)),
-										}))}
 										onChange={(val) => {
 											if (val) {
 												updatePreference((draft) => {
 													draft.general.reviewScale = val as UserReviewScale;
-												});
-											}
-										}}
-									/>
-								</Input.Wrapper>
-								<Input.Wrapper
-									label="Grid packing"
-									description="Display size for library user interface elements"
-								>
-									<SegmentedControl
-										mt="xs"
-										size="xs"
-										fullWidth
-										disabled={!!isEditDisabled}
-										defaultValue={userPreferences.general.gridPacking}
-										data={Object.values(GridPacking).map((c) => ({
-											value: c,
-											label: startCase(snakeCase(c)),
-										}))}
-										onChange={(val) => {
-											if (val) {
-												updatePreference((draft) => {
-													draft.general.gridPacking = val as GridPacking;
 												});
 											}
 										}}
@@ -488,48 +470,21 @@ export default function Page() {
 					</Tabs.Panel>
 					<Tabs.Panel value="fitness">
 						<Stack>
-							<SimpleGrid
-								cols={{ base: 1, md: 2 }}
-								style={{ alignItems: "center" }}
-							>
-								<Group wrap="nowrap">
-									<ActionIcon
-										onClick={async () => {
-											if (Notification.permission !== "granted") {
-												await Notification.requestPermission();
-												window.location.reload();
-											} else
-												notifications.show({
-													color: "green",
-													message: "You have already granted permissions",
-												});
-										}}
-									>
-										<IconBellRinging />
-									</ActionIcon>
-									<Text size="xs">
-										Send me notifications related to the current workout
-									</Text>
-								</Group>
-								<Select
-									size="xs"
-									disabled={!!isEditDisabled}
-									label="Unit system to use for measurements"
-									defaultValue={userPreferences.fitness.exercises.unitSystem}
-									data={Object.values(UserUnitSystem).map((c) => ({
-										value: c,
-										label: startCase(c.toLowerCase()),
-									}))}
-									onChange={(val) => {
-										if (val) {
-											updatePreference((draft) => {
-												draft.fitness.exercises.unitSystem =
-													val as UserUnitSystem;
-											});
-										}
-									}}
-								/>
-							</SimpleGrid>
+							<Select
+								size="xs"
+								disabled={!!isEditDisabled}
+								label="Unit system to use for measurements"
+								data={convertEnumToSelectData(UserUnitSystem)}
+								defaultValue={userPreferences.fitness.exercises.unitSystem}
+								onChange={(val) => {
+									if (val) {
+										updatePreference((draft) => {
+											draft.fitness.exercises.unitSystem =
+												val as UserUnitSystem;
+										});
+									}
+								}}
+							/>
 							<Input.Wrapper
 								label="Default Rest Timers"
 								description="When adding an exercise to your workout, these timer values will be used if you have not configured a rest timer for that exercise."
@@ -563,7 +518,13 @@ export default function Page() {
 							</Input.Wrapper>
 							<Divider />
 							<Title order={4}>Workout logging</Title>
-							{(["muteSounds", "promptForRestTimer"] as const).map((option) => {
+							{(
+								[
+									"muteSounds",
+									"promptForRestTimer",
+									"startTimerForDurationExercises",
+								] as const
+							).map((option) => {
 								const [label, isGatedBehindServerKeyValidation] = match(option)
 									.with(
 										"muteSounds",
@@ -575,6 +536,13 @@ export default function Page() {
 											[
 												"Prompt for rest timer when confirming sets",
 												true,
+											] as const,
+									)
+									.with(
+										"startTimerForDurationExercises",
+										() =>
+											[
+												"Start timer for exercises where duration is set",
 											] as const,
 									)
 									.exhaustive();

@@ -1,214 +1,214 @@
 import {
 	ActionIcon,
-	Box,
-	Center,
 	Checkbox,
 	Container,
 	Divider,
 	Flex,
 	Group,
-	Pagination,
 	Select,
 	Stack,
 	Tabs,
 	Text,
 	Title,
 } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
 import {
 	EntityLot,
+	FilterPresetContextType,
 	GraphqlSortOrder,
+	type MediaCollectionFilter,
 	MediaSource,
 	PeopleSearchDocument,
 	PersonAndMetadataGroupsSortBy,
 	UserPeopleListDocument,
 	type UserPeopleListInput,
 } from "@ryot/generated/graphql/backend/graphql";
-import {
-	changeCase,
-	cloneDeep,
-	isEqual,
-	parseParameters,
-	parseSearchQuery,
-	startCase,
-	zodBoolAsString,
-	zodIntAsString,
-} from "@ryot/ts-utils";
+import { cloneDeep, startCase } from "@ryot/ts-utils";
 import {
 	IconCheck,
 	IconFilter,
 	IconListCheck,
 	IconSearch,
-	IconSortAscending,
-	IconSortDescending,
 } from "@tabler/icons-react";
-import { useLoaderData, useNavigate } from "react-router";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useNavigate } from "react-router";
 import { $path } from "safe-routes";
-import { match } from "ts-pattern";
-import { z } from "zod";
 import {
-	ApplicationGrid,
-	BulkEditingAffix,
+	ApplicationPagination,
+	CreateButton,
+	DisplayListDetailsAndRefresh,
+	SkeletonLoader,
+} from "~/components/common";
+import { BulkCollectionEditingAffix } from "~/components/common/BulkCollectionEditingAffix";
+import {
+	FilterPresetBar,
+	FilterPresetModalManager,
+} from "~/components/common/filter-presets";
+import {
 	CollectionsFilter,
 	DebouncedSearchInput,
-	DisplayListDetailsAndRefresh,
 	FiltersModal,
-} from "~/components/common";
-import { PersonDisplayItem } from "~/components/media";
-import {
-	clientGqlService,
-	pageQueryParam,
-	zodCollectionFilter,
-} from "~/lib/common";
-import { useAppSearchParam, useCoreDetails } from "~/lib/hooks";
+	SortOrderToggle,
+} from "~/components/common/filters";
+import { ApplicationGrid } from "~/components/common/layout";
+import { PersonDisplayItem } from "~/components/media/display-items";
+import { useFilterModals } from "~/lib/hooks/filters/use-modals";
+import { useFilterPresets } from "~/lib/hooks/filters/use-presets";
+import { useFilterState } from "~/lib/hooks/filters/use-state";
+import { useCoreDetails, useUserPeopleList } from "~/lib/shared/hooks";
+import { clientGqlService, queryFactory } from "~/lib/shared/react-query";
+import { convertEnumToSelectData } from "~/lib/shared/ui-utils";
 import { useBulkEditCollection } from "~/lib/state/collection";
-import {
-	getSearchEnhancedCookieName,
-	redirectToFirstPageIfOnInvalidPage,
-	redirectUsingEnhancedCookieSearchParams,
-	serverGqlService,
-} from "~/lib/utilities.server";
-import type { Route } from "./+types/_dashboard.media.people.$action";
+import type { FilterUpdateFunction } from "~/lib/types";
 
-export type SearchParams = {
-	query?: string;
-};
+interface ListFilterState {
+	page: number;
+	query: string;
+	orderBy: GraphqlSortOrder;
+	collections: MediaCollectionFilter[];
+	sortBy: PersonAndMetadataGroupsSortBy;
+}
 
-const defaultFilters = {
+interface SearchFilterState {
+	page: number;
+	query: string;
+	source: MediaSource;
+	sourceSpecifics: {
+		isTvdbCompany?: boolean;
+		isTmdbCompany?: boolean;
+		isAnilistStudio?: boolean;
+		isGiantBombCompany?: boolean;
+		isHardcoverPublisher?: boolean;
+	};
+}
+
+const defaultListFilters: ListFilterState = {
+	page: 1,
+	query: "",
 	collections: [],
 	orderBy: GraphqlSortOrder.Desc,
 	sortBy: PersonAndMetadataGroupsSortBy.AssociatedEntityCount,
 };
 
-enum Action {
-	List = "list",
-	Search = "search",
-}
-
-const searchSchema = z.object({
-	isTmdbCompany: zodBoolAsString.optional(),
-	isAnilistStudio: zodBoolAsString.optional(),
-	isHardcoverPublisher: zodBoolAsString.optional(),
-	source: z.nativeEnum(MediaSource).default(MediaSource.Tmdb),
-});
-
-export const loader = async ({ request, params }: Route.LoaderArgs) => {
-	const { action } = parseParameters(
-		params,
-		z.object({ action: z.nativeEnum(Action) }),
-	);
-	const cookieName = await getSearchEnhancedCookieName(
-		`people.${action}`,
-		request,
-	);
-	await redirectUsingEnhancedCookieSearchParams(request, cookieName);
-	const schema = z.object({
-		query: z.string().optional(),
-		[pageQueryParam]: zodIntAsString.default("1"),
-	});
-	const query = parseSearchQuery(request, schema);
-	const [totalResults, list, search, respectCoreDetailsPageSize, listInput] =
-		await match(action)
-			.with(Action.List, async () => {
-				const listSchema = z.object({
-					collections: zodCollectionFilter,
-					orderBy: z
-						.nativeEnum(GraphqlSortOrder)
-						.default(defaultFilters.orderBy),
-					sortBy: z
-						.nativeEnum(PersonAndMetadataGroupsSortBy)
-						.default(defaultFilters.sortBy),
-				});
-				const urlParse = parseSearchQuery(request, listSchema);
-				const input: UserPeopleListInput = {
-					filter: { collections: urlParse.collections },
-					sort: { by: urlParse.sortBy, order: urlParse.orderBy },
-					search: { page: query[pageQueryParam], query: query.query },
-				};
-				const { userPeopleList } = await serverGqlService.authenticatedRequest(
-					request,
-					UserPeopleListDocument,
-					{ input },
-				);
-				return [
-					userPeopleList.response.details.total,
-					{ list: userPeopleList, url: urlParse },
-					undefined,
-					false,
-					input,
-				] as const;
-			})
-			.with(Action.Search, async () => {
-				const urlParse = parseSearchQuery(request, searchSchema);
-				const { peopleSearch } = await serverGqlService.authenticatedRequest(
-					request,
-					PeopleSearchDocument,
-					{
-						input: {
-							source: urlParse.source,
-							sourceSpecifics: {
-								isTmdbCompany: urlParse.isTmdbCompany,
-								isAnilistStudio: urlParse.isAnilistStudio,
-								isHardcoverPublisher: urlParse.isHardcoverPublisher,
-							},
-							search: { page: query[pageQueryParam], query: query.query },
-						},
-					},
-				);
-				return [
-					peopleSearch.details.total,
-					undefined,
-					{ search: peopleSearch, url: urlParse },
-					true,
-					undefined,
-				] as const;
-			})
-			.exhaustive();
-	const totalPages = await redirectToFirstPageIfOnInvalidPage({
-		request,
-		totalResults,
-		respectCoreDetailsPageSize,
-		currentPage: query[pageQueryParam],
-	});
-	return {
-		list,
-		query,
-		action,
-		search,
-		listInput,
-		totalPages,
-		cookieName,
-		[pageQueryParam]: query[pageQueryParam],
-	};
+const defaultSearchFilters: SearchFilterState = {
+	page: 1,
+	query: "",
+	sourceSpecifics: {},
+	source: MediaSource.Tmdb,
 };
 
-export const meta = ({ params }: Route.MetaArgs) => {
-	return [{ title: `${changeCase(params.action || "")} People | Ryot` }];
+export const meta = () => {
+	return [{ title: "People | Ryot" }];
 };
 
-export default function Page() {
-	const loaderData = useLoaderData<typeof loader>();
+export default function Page(props: { params: { action: string } }) {
 	const navigate = useNavigate();
+	const action = props.params.action;
 	const coreDetails = useCoreDetails();
-	const [_e, { setP }] = useAppSearchParam(loaderData.cookieName);
-	const [
-		filtersModalOpened,
-		{ open: openFiltersModal, close: closeFiltersModal },
-	] = useDisclosure(false);
-	const bulkEditingCollection = useBulkEditCollection();
 
-	const bulkEditingState = bulkEditingCollection.state;
-	const areFiltersApplied =
-		loaderData.list?.url.orderBy !== defaultFilters.orderBy ||
-		loaderData.list?.url.sortBy !== defaultFilters.sortBy ||
-		!isEqual(loaderData.list?.url.collections, defaultFilters.collections);
+	const listModals = useFilterModals();
+	const searchModals = useFilterModals();
+
+	const listState = useFilterState({
+		storageKey: "PeopleListFilters",
+		defaultFilters: defaultListFilters,
+	});
+
+	const searchState = useFilterState({
+		storageKey: "PeopleSearchFilters",
+		defaultFilters: defaultSearchFilters,
+	});
+
+	const listPresets = useFilterPresets({
+		enabled: action === "list",
+		filters: listState.normalizedFilters,
+		setFilters: listState.setFiltersState,
+		storageKeyPrefix: "PeopleListActivePreset",
+		contextType: FilterPresetContextType.PeopleList,
+	});
+
+	const searchPresets = useFilterPresets({
+		enabled: action === "search",
+		filters: searchState.normalizedFilters,
+		setFilters: searchState.setFiltersState,
+		storageKeyPrefix: "PeopleSearchActivePreset",
+		contextType: FilterPresetContextType.PeopleSearch,
+	});
+
+	const listInput: UserPeopleListInput = useMemo(
+		() => ({
+			filter: { collections: listState.normalizedFilters.collections },
+			sort: {
+				by: listState.normalizedFilters.sortBy,
+				order: listState.normalizedFilters.orderBy,
+			},
+			search: {
+				page: listState.normalizedFilters.page,
+				query: listState.normalizedFilters.query,
+			},
+		}),
+		[listState.normalizedFilters],
+	);
+
+	const { data: userPeopleList, refetch: refetchUserPeopleList } =
+		useUserPeopleList(listInput, action === "list");
+
+	const searchInput = useMemo(
+		() => ({
+			source: searchState.normalizedFilters.source,
+			sourceSpecifics: searchState.normalizedFilters.sourceSpecifics,
+			search: {
+				page: searchState.normalizedFilters.page,
+				query: searchState.normalizedFilters.query,
+			},
+		}),
+		[searchState.normalizedFilters],
+	);
+
+	const { data: peopleSearch } = useQuery({
+		enabled: action === "search",
+		queryKey: queryFactory.media.peopleSearch(searchInput).queryKey,
+		queryFn: () =>
+			clientGqlService
+				.request(PeopleSearchDocument, { input: searchInput })
+				.then((data) => data.peopleSearch),
+	});
+
+	const searchInputValue =
+		action === "list"
+			? listState.normalizedFilters.query
+			: searchState.normalizedFilters.query;
+
+	const updateSearchSourceSpecifics = (key: string, value: boolean) => {
+		const prevFilters = searchState.normalizedFilters;
+		searchState.setFiltersState({
+			...prevFilters,
+			sourceSpecifics: {
+				...defaultSearchFilters.sourceSpecifics,
+				...prevFilters.sourceSpecifics,
+				[key]: value,
+			},
+		});
+	};
 
 	return (
 		<>
-			<BulkEditingAffix
+			<FilterPresetModalManager
+				presetManager={listPresets}
+				opened={listModals.presetModal.opened}
+				onClose={listModals.presetModal.close}
+				placeholder="e.g., Favorite Directors"
+			/>
+			<FilterPresetModalManager
+				presetManager={searchPresets}
+				opened={searchModals.presetModal.opened}
+				onClose={searchModals.presetModal.close}
+				placeholder="e.g., TMDB Casting Directors"
+			/>
+			<BulkCollectionEditingAffix
 				bulkAddEntities={async () => {
-					if (!loaderData.listInput) return [];
-					const input = cloneDeep(loaderData.listInput);
+					if (action !== "list") return [];
+					const input = cloneDeep(listInput);
 					input.search = { ...input.search, take: Number.MAX_SAFE_INTEGER };
 					return await clientGqlService
 						.request(UserPeopleListDocument, { input })
@@ -225,20 +225,9 @@ export default function Page() {
 					<Title>People</Title>
 					<Tabs
 						variant="default"
-						value={loaderData.action}
+						value={action}
 						onChange={(v) => {
-							if (v)
-								navigate(
-									$path(
-										"/media/people/:action",
-										{ action: v },
-										{
-											...(loaderData.query.query && {
-												query: loaderData.query.query,
-											}),
-										},
-									),
-								);
+							if (v) navigate($path("/media/people/:action", { action: v }));
 						}}
 					>
 						<Tabs.List style={{ alignItems: "center" }}>
@@ -248,152 +237,144 @@ export default function Page() {
 							<Tabs.Tab value="search" leftSection={<IconSearch size={24} />}>
 								<Text>Search</Text>
 							</Tabs.Tab>
+							<CreateButton
+								to={$path("/media/people/update/:action", { action: "create" })}
+							/>
 						</Tabs.List>
 					</Tabs>
 
 					<Group wrap="nowrap">
 						<DebouncedSearchInput
+							value={searchInputValue}
 							placeholder="Search for people"
-							initialValue={loaderData.query.query}
-							enhancedQueryParams={loaderData.cookieName}
+							onChange={(value) => {
+								if (action === "list") {
+									listState.updateQuery(value);
+								} else {
+									searchState.updateQuery(value);
+								}
+							}}
 						/>
-						{loaderData.action === Action.List ? (
+						{action === "list" ? (
 							<>
 								<ActionIcon
-									onClick={openFiltersModal}
-									color={areFiltersApplied ? "blue" : "gray"}
+									onClick={listModals.filtersModal.open}
+									color={listState.areFiltersActive ? "blue" : "gray"}
 								>
 									<IconFilter size={24} />
 								</ActionIcon>
 								<FiltersModal
-									closeFiltersModal={closeFiltersModal}
-									cookieName={loaderData.cookieName}
-									opened={filtersModalOpened}
+									resetFilters={listState.resetFilters}
+									opened={listModals.filtersModal.opened}
+									onSavePreset={listModals.presetModal.open}
+									closeFiltersModal={listModals.filtersModal.close}
 								>
-									<FiltersModalForm />
+									<FiltersModalForm
+										filters={listState.normalizedFilters}
+										onFiltersChange={listState.updateFilter}
+									/>
 								</FiltersModal>
 							</>
 						) : null}
-						{loaderData.action === Action.Search ? (
+						{action === "search" ? (
 							<>
 								<Select
-									onChange={(v) => setP("source", v)}
-									defaultValue={loaderData.search?.url.source}
+									value={searchState.normalizedFilters.source}
+									onChange={(v) => {
+										searchState.updateFilter("source", v as MediaSource);
+										searchState.updateFilter("page", 1);
+									}}
 									data={coreDetails.peopleSearchSources.map((o) => ({
-										value: o.toString(),
+										value: o,
 										label: startCase(o.toLowerCase()),
 									}))}
 								/>
-								{loaderData.search?.url.source === MediaSource.Tmdb ? (
-									<Checkbox
-										label="Company"
-										checked={loaderData.search?.url.isTmdbCompany}
-										onChange={(e) =>
-											setP("isTmdbCompany", String(e.target.checked))
-										}
+								<ActionIcon
+									onClick={searchModals.filtersModal.open}
+									color={searchState.areFiltersActive ? "blue" : "gray"}
+								>
+									<IconFilter size={24} />
+								</ActionIcon>
+								<FiltersModal
+									resetFilters={searchState.resetFilters}
+									opened={searchModals.filtersModal.opened}
+									onSavePreset={searchModals.presetModal.open}
+									closeFiltersModal={searchModals.filtersModal.close}
+								>
+									<SearchFiltersModalForm
+										filters={searchState.normalizedFilters}
+										onFiltersChange={updateSearchSourceSpecifics}
 									/>
-								) : null}
-								{loaderData.search?.url.source === MediaSource.Anilist ? (
-									<Checkbox
-										label="Studio"
-										checked={loaderData.search?.url.isAnilistStudio}
-										onChange={(e) =>
-											setP("isAnilistStudio", String(e.target.checked))
-										}
-									/>
-								) : null}
-								{loaderData.search?.url.source === MediaSource.Hardcover ? (
-									<Checkbox
-										label="Publisher"
-										checked={loaderData.search?.url.isHardcoverPublisher}
-										onChange={(e) =>
-											setP("isHardcoverPublisher", String(e.target.checked))
-										}
-									/>
-								) : null}
+								</FiltersModal>
 							</>
 						) : null}
 					</Group>
-					{loaderData.list ? (
-						<>
-							<DisplayListDetailsAndRefresh
-								cacheId={loaderData.list.list.cacheId}
-								total={loaderData.list.list.response.details.total}
-							/>
-							{loaderData.list.list.response.details.total > 0 ? (
-								<ApplicationGrid>
-									{loaderData.list.list.response.items.map((person) => {
-										const becItem = {
-											entityId: person,
-											entityLot: EntityLot.Person,
-										};
-										const isAdded = bulkEditingCollection.isAdded(becItem);
-										return (
+					{action === "list" ? (
+						<FilterPresetBar presetManager={listPresets} />
+					) : null}
+					{action === "search" ? (
+						<FilterPresetBar presetManager={searchPresets} />
+					) : null}
+					{action === "list" ? (
+						userPeopleList ? (
+							<>
+								<DisplayListDetailsAndRefresh
+									cacheId={userPeopleList.cacheId}
+									total={userPeopleList.response.details.totalItems}
+									onRefreshButtonClicked={refetchUserPeopleList}
+									isRandomSortOrderSelected={
+										listState.normalizedFilters.sortBy ===
+										PersonAndMetadataGroupsSortBy.Random
+									}
+								/>
+								{userPeopleList.response.details.totalItems > 0 ? (
+									<ApplicationGrid>
+										{userPeopleList.response.items.map((person) => (
+											<PersonListItem key={person} item={person} />
+										))}
+									</ApplicationGrid>
+								) : (
+									<Text>No information to display</Text>
+								)}
+								<ApplicationPagination
+									value={listState.normalizedFilters.page}
+									onChange={(v) => listState.updateFilter("page", v)}
+									totalItems={userPeopleList.response.details.totalItems}
+								/>
+							</>
+						) : (
+							<SkeletonLoader />
+						)
+					) : null}
+
+					{action === "search" ? (
+						peopleSearch ? (
+							<>
+								<DisplayListDetailsAndRefresh
+									total={peopleSearch.response.details.totalItems}
+								/>
+								{peopleSearch.response.details.totalItems > 0 ? (
+									<ApplicationGrid>
+										{peopleSearch.response.items.map((person) => (
 											<PersonDisplayItem
 												key={person}
 												personId={person}
-												topRight={
-													bulkEditingState &&
-													bulkEditingState.data.action === "add" ? (
-														<ActionIcon
-															variant={isAdded ? "filled" : "transparent"}
-															color="green"
-															onClick={() => {
-																if (isAdded) bulkEditingState.remove(becItem);
-																else bulkEditingState.add(becItem);
-															}}
-														>
-															<IconCheck size={18} />
-														</ActionIcon>
-													) : undefined
-												}
+												shouldHighlightNameIfInteracted
 											/>
-										);
-									})}
-								</ApplicationGrid>
-							) : (
-								<Text>No information to display</Text>
-							)}
-							<Center>
-								<Pagination
-									size="sm"
-									total={loaderData.totalPages}
-									value={loaderData[pageQueryParam]}
-									onChange={(v) => setP(pageQueryParam, v.toString())}
+										))}
+									</ApplicationGrid>
+								) : (
+									<Text>No people found matching your query</Text>
+								)}
+								<ApplicationPagination
+									value={searchState.normalizedFilters.page}
+									onChange={(v) => searchState.updateFilter("page", v)}
+									totalItems={peopleSearch.response.details.totalItems}
 								/>
-							</Center>
-						</>
-					) : null}
-					{loaderData.search ? (
-						<>
-							<Box>
-								<Text display="inline" fw="bold">
-									{loaderData.search.search.details.total}
-								</Text>{" "}
-								items found
-							</Box>
-							{loaderData.search.search.details.total > 0 ? (
-								<ApplicationGrid>
-									{loaderData.search.search.items.map((person) => (
-										<PersonDisplayItem
-											key={person}
-											personId={person}
-											shouldHighlightNameIfInteracted
-										/>
-									))}
-								</ApplicationGrid>
-							) : (
-								<Text>No people found matching your query</Text>
-							)}
-							<Center>
-								<Pagination
-									size="sm"
-									total={loaderData.totalPages}
-									value={loaderData[pageQueryParam]}
-									onChange={(v) => setP(pageQueryParam, v.toString())}
-								/>
-							</Center>
-						</>
+							</>
+						) : (
+							<SkeletonLoader />
+						)
 					) : null}
 				</Stack>
 			</Container>
@@ -401,43 +382,125 @@ export default function Page() {
 	);
 }
 
-const FiltersModalForm = () => {
-	const loaderData = useLoaderData<typeof loader>();
-	const [_, { setP }] = useAppSearchParam(loaderData.cookieName);
+interface FiltersModalFormProps {
+	filters: ListFilterState;
+	onFiltersChange: FilterUpdateFunction<ListFilterState>;
+}
 
-	if (!loaderData.list) return null;
+const FiltersModalForm = (props: FiltersModalFormProps) => {
+	const { filters, onFiltersChange } = props;
 
 	return (
 		<>
 			<Flex gap="xs" align="center">
 				<Select
 					w="100%"
-					onChange={(v) => setP("sortBy", v)}
-					defaultValue={loaderData.list.url.sortBy}
-					data={Object.values(PersonAndMetadataGroupsSortBy).map((o) => ({
-						value: o.toString(),
-						label: startCase(o.toLowerCase()),
-					}))}
+					value={filters.sortBy}
+					data={convertEnumToSelectData(PersonAndMetadataGroupsSortBy)}
+					onChange={(v) =>
+						v && onFiltersChange("sortBy", v as PersonAndMetadataGroupsSortBy)
+					}
 				/>
-				<ActionIcon
-					onClick={() => {
-						if (loaderData.list?.url.orderBy === GraphqlSortOrder.Asc)
-							setP("orderBy", GraphqlSortOrder.Desc);
-						else setP("orderBy", GraphqlSortOrder.Asc);
-					}}
-				>
-					{loaderData.list.url.orderBy === GraphqlSortOrder.Asc ? (
-						<IconSortAscending />
-					) : (
-						<IconSortDescending />
-					)}
-				</ActionIcon>
+				{filters.sortBy !== PersonAndMetadataGroupsSortBy.Random ? (
+					<SortOrderToggle
+						currentOrder={filters.orderBy}
+						onOrderChange={(order) => onFiltersChange("orderBy", order)}
+					/>
+				) : null}
 			</Flex>
 			<Divider />
 			<CollectionsFilter
-				cookieName={loaderData.cookieName}
-				applied={loaderData.list.url.collections}
+				applied={filters.collections}
+				onFiltersChanged={(val) => onFiltersChange("collections", val)}
 			/>
 		</>
+	);
+};
+
+interface SearchFiltersModalFormProps {
+	filters: SearchFilterState;
+	onFiltersChange: (key: string, value: boolean) => void;
+}
+
+const SearchFiltersModalForm = (props: SearchFiltersModalFormProps) => {
+	const { filters, onFiltersChange } = props;
+
+	return (
+		<Stack gap="md">
+			{filters.source === MediaSource.Tvdb ? (
+				<Checkbox
+					label="Company"
+					checked={filters.sourceSpecifics.isTvdbCompany || false}
+					onChange={(e) => onFiltersChange("isTvdbCompany", e.target.checked)}
+				/>
+			) : null}
+			{filters.source === MediaSource.Tmdb ? (
+				<Checkbox
+					label="Company"
+					checked={filters.sourceSpecifics.isTmdbCompany || false}
+					onChange={(e) => onFiltersChange("isTmdbCompany", e.target.checked)}
+				/>
+			) : null}
+			{filters.source === MediaSource.Anilist ? (
+				<Checkbox
+					label="Studio"
+					checked={filters.sourceSpecifics.isAnilistStudio || false}
+					onChange={(e) => onFiltersChange("isAnilistStudio", e.target.checked)}
+				/>
+			) : null}
+			{filters.source === MediaSource.Hardcover ? (
+				<Checkbox
+					label="Publisher"
+					checked={filters.sourceSpecifics.isHardcoverPublisher || false}
+					onChange={(e) =>
+						onFiltersChange("isHardcoverPublisher", e.target.checked)
+					}
+				/>
+			) : null}
+			{filters.source === MediaSource.GiantBomb ? (
+				<Checkbox
+					label="Company"
+					checked={filters.sourceSpecifics.isGiantBombCompany || false}
+					onChange={(e) =>
+						onFiltersChange("isGiantBombCompany", e.target.checked)
+					}
+				/>
+			) : null}
+		</Stack>
+	);
+};
+
+type PersonListItemProps = {
+	item: string;
+};
+
+const PersonListItem = (props: PersonListItemProps) => {
+	const bulkEditingCollection = useBulkEditCollection();
+	const bulkEditingState = bulkEditingCollection.state;
+
+	const becItem = { entityId: props.item, entityLot: EntityLot.Person };
+	const isAlreadyPresent = bulkEditingCollection.isAlreadyPresent(becItem);
+	const isAdded = bulkEditingCollection.isAdded(becItem);
+
+	return (
+		<PersonDisplayItem
+			personId={props.item}
+			centerElement={
+				bulkEditingState &&
+				bulkEditingState.data.action === "add" &&
+				!isAlreadyPresent ? (
+					<ActionIcon
+						color="green"
+						variant={isAdded ? "filled" : "transparent"}
+						onClick={() => {
+							if (isAdded) bulkEditingState.remove(becItem);
+							else bulkEditingState.add(becItem);
+						}}
+					>
+						<IconCheck size={18} />
+					</ActionIcon>
+				) : undefined
+			}
+		/>
 	);
 };

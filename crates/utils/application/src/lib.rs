@@ -1,13 +1,13 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use async_graphql::{Error, Result};
+use anyhow::Result;
 use axum::{
     Extension, RequestPartsExt,
     extract::FromRequestParts,
     http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 use chrono::{NaiveDate, NaiveDateTime, Utc};
-use common_utils::{FRONTEND_OAUTH_ENDPOINT, USER_AGENT_STR, ryot_log};
+use common_utils::{FRONTEND_OAUTH_ENDPOINT, ryot_log};
 use media_models::{
     GraphqlSortOrder, PodcastEpisode, PodcastSpecifics, ReviewItem, ShowEpisode, ShowSeason,
     ShowSpecifics,
@@ -23,23 +23,14 @@ use openidconnect::{
     },
     reqwest,
 };
-use reqwest::{
-    ClientBuilder,
-    header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT},
-};
 use rust_decimal::Decimal;
 use sea_orm::Order;
-
-pub fn user_id_from_token(token: &str, jwt_secret: &str) -> Result<String> {
-    jwt_service::verify(token, jwt_secret)
-        .map(|c| c.sub)
-        .map_err(|e| Error::new(format!("Encountered error: {:?}", e)))
-}
+use supporting_service::SupportingService;
 
 #[derive(Debug, Default)]
 pub struct AuthContext {
-    pub auth_token: Option<String>,
     pub user_id: Option<String>,
+    pub session_id: Option<String>,
 }
 
 impl<S> FromRequestParts<S> for AuthContext
@@ -52,35 +43,30 @@ where
         let mut ctx = AuthContext {
             ..Default::default()
         };
+
         if let Some(h) = parts.headers.get(AUTHORIZATION) {
-            ctx.auth_token = h.to_str().map(|s| s.replace("Bearer ", "")).ok();
+            ctx.session_id = h.to_str().map(|s| s.replace("Bearer ", "")).ok();
         } else if let Some(h) = parts.headers.get("x-auth-token") {
-            ctx.auth_token = h.to_str().map(String::from).ok();
+            ctx.session_id = h.to_str().map(String::from).ok();
         }
-        if let Some(auth_token) = ctx.auth_token.as_ref() {
-            let Extension(config) = parts
-                .extract::<Extension<Arc<config::AppConfig>>>()
+        if let Some(session_id) = ctx.session_id.as_ref() {
+            let Extension(ss) = parts
+                .extract::<Extension<Arc<SupportingService>>>()
                 .await
-                .unwrap();
-            if let Ok(user_id) = user_id_from_token(auth_token, &config.users.jwt_secret) {
-                ctx.user_id = Some(user_id);
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Supporting service not available",
+                    )
+                })?;
+
+            if let Ok(Some(session)) = session_service::validate_session(&ss, session_id).await {
+                ctx.user_id = Some(session.user_id);
             }
         }
+
         Ok(ctx)
     }
-}
-
-pub fn get_base_http_client(headers: Option<Vec<(HeaderName, HeaderValue)>>) -> reqwest::Client {
-    let mut req_headers = HeaderMap::new();
-    req_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
-    for (header, value) in headers.unwrap_or_default().into_iter() {
-        req_headers.insert(header, value);
-    }
-    ClientBuilder::new()
-        .default_headers(req_headers)
-        .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap()
 }
 
 pub fn get_current_time(timezone: &chrono_tz::Tz) -> NaiveDateTime {
@@ -156,7 +142,7 @@ pub type ApplicationOidcClient<
 >;
 
 pub async fn create_oidc_client(
-    config: &config::AppConfig,
+    config: &config_definition::AppConfig,
 ) -> Option<(reqwest::Client, ApplicationOidcClient)> {
     match RedirectUrl::new(config.frontend.url.clone() + FRONTEND_OAUTH_ENDPOINT) {
         Ok(redirect_url) => match IssuerUrl::new(config.server.oidc.issuer_url.clone()) {
@@ -193,13 +179,19 @@ pub async fn create_oidc_client(
     }
 }
 
-pub fn calculate_average_rating(reviews: &[ReviewItem]) -> Option<Decimal> {
-    let reviews_with_ratings = reviews.iter().filter_map(|r| r.rating).count();
-    match reviews_with_ratings {
+pub fn calculate_average_rating_for_user(
+    user_id: &String,
+    reviews: &[ReviewItem],
+) -> Option<Decimal> {
+    let (sum, count) = reviews
+        .iter()
+        .filter(|r| r.posted_by.id == *user_id && r.rating.is_some())
+        .map(|r| r.rating.unwrap())
+        .fold((Decimal::ZERO, 0), |(sum, count), rating| {
+            (sum + rating, count + 1)
+        });
+    match count {
         0 => None,
-        _ => Some(
-            reviews.iter().filter_map(|r| r.rating).sum::<Decimal>()
-                / Decimal::from(reviews_with_ratings),
-        ),
+        _ => Some(sum / Decimal::from(count)),
     }
 }

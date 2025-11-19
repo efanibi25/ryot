@@ -1,4 +1,4 @@
-ARG NODE_BASE_IMAGE=node:20.10.0-bookworm-slim
+ARG NODE_BASE_IMAGE=node:24.4.0-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM $NODE_BASE_IMAGE AS node-build-base
 
@@ -30,4 +30,4 @@ COPY --from=website-builder --chown=ryot:ryot /app/apps/website/node_modules ./n
 COPY --from=website-builder --chown=ryot:ryot /app/apps/website/package.json ./package.json
 COPY --from=website-builder --chown=ryot:ryot /app/apps/website/build ./build
 COPY --chown=ryot:ryot apps/website/app/drizzle/migrations app/drizzle/migrations
-CMD mkdir tmp && npx react-router-serve ./build/server/index.js
+CMD mkdir -p tmp && npx react-router-serve ./build/server/index.js

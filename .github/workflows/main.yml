@@ -135,19 +135,16 @@ jobs:
           restore-keys: |
             cargo-build-${{ runner.os }}-${{ matrix.platform.target }}-
       - name: Install cross
-        uses: taiki-e/cache-cargo-install-action@4d586f211d9b0bca9e7b59e57e2a0febf36c0929
+        uses: taiki-e/cache-cargo-install-action@ad4edd4113c497b54a89ab6ae296cc2ee975cae0
         with:
           tool: cross
           git: https://github.com/cross-rs/cross
-          rev: c7dee4d008475ce1c140773cbcd6078f4b86c2aa
+          rev: 51f46f296253d8122c927c5bb933e3c4f27cc317
           locked: false
       - name: Build
         env:
-          UNKEY_API_ID: ${{ secrets.UNKEY_API_ID }}
+          UNKEY_ROOT_KEY: ${{ secrets.UNKEY_ROOT_KEY }}
           APP_VERSION: ${{ steps.build.outputs.version }}
-          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
-          DEFAULT_MAL_CLIENT_ID: ${{ secrets.DEFAULT_MAL_CLIENT_ID }}
-          DEFAULT_TMDB_ACCESS_TOKEN: ${{ secrets.DEFAULT_TMDB_ACCESS_TOKEN }}
         run: |
           cross build --locked --target ${{ matrix.platform.target }} --release
       - name: Upload build artifact
@@ -238,6 +235,34 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
         run: gh release upload --clobber "${REF_NAME}" "tmp/script.ryot.zip"
+
+  upload-browser-extensions:
+    needs:
+      - pre-workflow-checks
+      - build-docker
+    if: needs.pre-workflow-checks.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MOON_TOOLCHAIN_FORCE_GLOBALS: true
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Setup Moon
+        uses: moonrepo/setup-toolchain@937d7dbbc1ec218aa8641c792d5821addebd9f03
+        with:
+          auto-install: true
+      - name: Build browser extensions
+        run: |
+          moon run browser-extension:build
+      - name: Upload browser extensions to releases
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          gh release upload --clobber "${REF_NAME}" apps/browser-extension/dist/*.zip
 
   deploy-docs:
     needs:

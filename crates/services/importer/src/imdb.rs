@@ -1,15 +1,17 @@
-use async_graphql::Result;
+use anyhow::Result;
 use common_models::DefaultCollection;
 use common_utils::ryot_log;
 use csv::Reader;
-use dependent_models::{ImportCompletedItem, ImportResult};
+use dependent_models::{
+    CollectionToEntityDetails, ImportCompletedItem, ImportOrExportMetadataItem, ImportResult,
+};
 use enum_models::{MediaLot, MediaSource};
 use itertools::Itertools;
-use media_models::{DeployGenericCsvImportInput, ImportOrExportMetadataItem};
-pub use providers::tmdb::NonMediaTmdbService;
+use media_models::DeployGenericCsvImportInput;
 use serde::Deserialize;
+use tmdb_provider::NonMediaTmdbService;
 
-use super::{ImportFailStep, ImportFailedItem};
+use crate::{ImportFailStep, ImportFailedItem};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -73,19 +75,16 @@ pub async fn import(
                 continue;
             }
         };
-        ryot_log!(
-            debug,
-            "Found tmdb id: {} ({}/{})",
-            identifier,
-            idx + 1,
-            total
-        );
+        ryot_log!(debug, "Tmdb id: {} ({}/{})", identifier, idx + 1, total);
         completed.push(ImportCompletedItem::Metadata(ImportOrExportMetadataItem {
             lot,
             source,
             identifier,
             source_id: record.id,
-            collections: vec![DefaultCollection::Watchlist.to_string()],
+            collections: vec![CollectionToEntityDetails {
+                collection_name: DefaultCollection::Watchlist.to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         }));
     }

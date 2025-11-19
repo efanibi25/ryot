@@ -2,20 +2,17 @@
 
 use async_graphql::SimpleObject;
 use async_trait::async_trait;
-use chrono::{NaiveDate, Utc};
 use educe::Educe;
-use enum_models::{EntityLot, SeenState};
+use enum_models::SeenState;
 use media_models::{
     SeenAnimeExtraInformation, SeenMangaExtraInformation, SeenPodcastExtraInformation,
     SeenShowExtraInformation,
 };
 use nanoid::nanoid;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{ActiveValue, entity::prelude::*};
 use serde::{Deserialize, Serialize};
-
-use super::functions::associate_user_with_entity;
 
 #[derive(Clone, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize, SimpleObject, Educe)]
 #[graphql(name = "Seen")]
@@ -24,26 +21,25 @@ use super::functions::associate_user_with_entity;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
-    pub progress: Decimal,
-    pub started_on: Option<NaiveDate>,
-    pub finished_on: Option<NaiveDate>,
     pub user_id: String,
-    pub metadata_id: String,
     pub state: SeenState,
-    pub provider_watched_on: Option<String>,
+    pub progress: Decimal,
+    pub metadata_id: String,
+    pub num_times_updated: i32,
+    pub review_id: Option<String>,
     #[graphql(skip)]
     #[serde(skip)]
     #[educe(Debug(ignore))]
     pub updated_at: Vec<DateTimeUtc>,
+    pub last_updated_on: DateTimeUtc,
+    pub started_on: Option<DateTimeUtc>,
+    pub finished_on: Option<DateTimeUtc>,
+    pub manual_time_spent: Option<Decimal>,
+    pub providers_consumed_on: Vec<String>,
     pub show_extra_information: Option<SeenShowExtraInformation>,
-    pub podcast_extra_information: Option<SeenPodcastExtraInformation>,
     pub anime_extra_information: Option<SeenAnimeExtraInformation>,
     pub manga_extra_information: Option<SeenMangaExtraInformation>,
-    pub manual_time_spent: Option<Decimal>,
-    // Generated columns
-    pub last_updated_on: DateTimeUtc,
-    pub num_times_updated: i32,
-    pub review_id: Option<String>,
+    pub podcast_extra_information: Option<SeenPodcastExtraInformation>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -98,31 +94,9 @@ impl ActiveModelBehavior for ActiveModel {
     where
         C: ConnectionTrait,
     {
-        let state = self.state.clone().unwrap();
-        let progress = self.progress.clone().unwrap();
-        let finished_on = self.finished_on.clone().unwrap();
-        let started_on = self.started_on.clone().unwrap();
-        if progress == dec!(100) && state == SeenState::InProgress {
-            self.state = ActiveValue::Set(SeenState::Completed);
-            if finished_on.is_none() && started_on.is_some() {
-                self.finished_on = ActiveValue::Set(Some(Utc::now().date_naive()));
-            }
-        }
         if insert {
             self.id = ActiveValue::Set(format!("see_{}", nanoid!(12)));
         }
         Ok(self)
-    }
-
-    async fn after_save<C>(model: Model, db: &C, insert: bool) -> Result<Model, DbErr>
-    where
-        C: ConnectionTrait,
-    {
-        if insert {
-            associate_user_with_entity(db, &model.user_id, &model.metadata_id, EntityLot::Metadata)
-                .await
-                .ok();
-        }
-        Ok(model)
     }
 }

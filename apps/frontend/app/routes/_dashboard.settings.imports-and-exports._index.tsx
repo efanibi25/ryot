@@ -1,19 +1,17 @@
-import { CodeHighlight } from "@mantine/code-highlight";
 import {
-	Accordion,
 	ActionIcon,
 	Anchor,
 	Box,
 	Button,
 	Container,
 	Divider,
+	Drawer,
 	FileInput,
-	Flex,
 	Group,
 	Indicator,
+	Paper,
 	Progress,
 	Select,
-	Skeleton,
 	Stack,
 	Tabs,
 	Text,
@@ -23,12 +21,12 @@ import {
 	Tooltip,
 } from "@mantine/core";
 import { useInViewport } from "@mantine/hooks";
-import { parseFormData } from "@mjackson/form-data-parser";
 import {
 	DeployExportJobDocument,
 	DeployImportJobDocument,
 	ImportSource,
 	UserExportsDocument,
+	type UserExportsQuery,
 	UserImportReportsDocument,
 } from "@ryot/generated/graphql/backend/graphql";
 import {
@@ -37,49 +35,42 @@ import {
 	kebabCase,
 	processSubmission,
 } from "@ryot/ts-utils";
-import { IconDownload, IconTrash } from "@tabler/icons-react";
+import { IconDownload, IconEye, IconTrash } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { filesize } from "filesize";
-import { useState } from "react";
-import { Form, useLoaderData } from "react-router";
-import { $path } from "safe-routes";
+import { DataTable } from "mantine-datatable";
+import { useMemo, useState } from "react";
+import { Form, data } from "react-router";
 import { match } from "ts-pattern";
 import { withQuery } from "ufo";
 import { z } from "zod";
-import {
-	clientGqlService,
-	dayjsLib,
-	openConfirmationModal,
-} from "~/lib/common";
+import { SkeletonLoader } from "~/components/common";
+import { dayjsLib } from "~/lib/shared/date-utils";
 import {
 	useApplicationEvents,
 	useConfirmSubmit,
 	useCoreDetails,
+	useDeleteS3AssetMutation,
 	useNonHiddenUserCollections,
-} from "~/lib/hooks";
+} from "~/lib/shared/hooks";
+import { clientGqlService } from "~/lib/shared/react-query";
+import {
+	convertEnumToSelectData,
+	openConfirmationModal,
+} from "~/lib/shared/ui-utils";
 import {
 	createToastHeaders,
+	parseFormDataWithTemporaryUpload,
 	serverGqlService,
-	temporaryFileUploadHandler,
 } from "~/lib/utilities.server";
 import type { Route } from "./+types/_dashboard.settings.imports-and-exports._index";
-
-export const loader = async ({ request }: Route.LoaderArgs) => {
-	const [{ userExports }] = await Promise.all([
-		serverGqlService.authenticatedRequest(request, UserExportsDocument, {}),
-	]);
-	return { userExports };
-};
 
 export const meta = () => {
 	return [{ title: "Imports and Exports | Ryot" }];
 };
 
 export const action = async ({ request }: Route.ActionArgs) => {
-	const formData = await parseFormData(
-		request.clone(),
-		temporaryFileUploadHandler,
-	);
+	const formData = await parseFormDataWithTemporaryUpload(request.clone());
 	const intent = getActionIntent(request);
 	return await match(intent)
 		.with("deployImport", async () => {
@@ -91,6 +82,8 @@ export const action = async ({ request }: Route.ActionArgs) => {
 					ImportSource.Imdb,
 					ImportSource.OpenScale,
 					ImportSource.Goodreads,
+					ImportSource.Grouvee,
+					ImportSource.Hardcover,
 					ImportSource.Storygraph,
 					() => ({
 						genericCsv: processSubmission(formData, genericCsvImportFormSchema),
@@ -108,7 +101,7 @@ export const action = async ({ request }: Route.ActionArgs) => {
 					strongApp: processSubmission(formData, strongAppImportFormSchema),
 				}))
 				.with(ImportSource.Trakt, () => ({
-					trakt: processSubmission(formData, usernameImportFormSchema),
+					trakt: processSubmission(formData, traktImportFormSchema),
 				}))
 				.with(ImportSource.Movary, async () => ({
 					movary: processSubmission(formData, movaryImportFormSchema),
@@ -116,8 +109,16 @@ export const action = async ({ request }: Route.ActionArgs) => {
 				.with(ImportSource.Myanimelist, async () => ({
 					mal: processSubmission(formData, malImportFormSchema),
 				}))
-				.with(ImportSource.GenericJson, ImportSource.Anilist, async () => ({
-					genericJson: processSubmission(formData, jsonImportFormSchema),
+				.with(
+					ImportSource.GenericJson,
+					ImportSource.Anilist,
+
+					async () => ({
+						path: processSubmission(formData, exportPathImportFormSchema),
+					}),
+				)
+				.with(ImportSource.Netflix, async () => ({
+					netflix: processSubmission(formData, netflixImportFormSchema),
 				}))
 				.with(ImportSource.Jellyfin, async () => ({
 					jellyfin: processSubmission(formData, jellyfinImportFormSchema),
@@ -131,7 +132,7 @@ export const action = async ({ request }: Route.ActionArgs) => {
 				DeployImportJobDocument,
 				{ input: { source, ...values } },
 			);
-			return Response.json({ status: "success" } as const, {
+			return data({ status: "success" } as const, {
 				headers: await createToastHeaders({
 					type: "success",
 					message: "Import job started in the background",
@@ -142,9 +143,8 @@ export const action = async ({ request }: Route.ActionArgs) => {
 			await serverGqlService.authenticatedRequest(
 				request,
 				DeployExportJobDocument,
-				{},
 			);
-			return Response.json({ status: "success" } as const, {
+			return data({ status: "success" } as const, {
 				headers: await createToastHeaders({
 					type: "success",
 					message: "Export job started in the background",
@@ -154,19 +154,28 @@ export const action = async ({ request }: Route.ActionArgs) => {
 		.run();
 };
 
+const traktImportFormSchema = z.object({
+	user: z.string().optional(),
+	list: z.object({ url: z.string(), collection: z.string() }).optional(),
+});
+
 const usernameImportFormSchema = z.object({ username: z.string() });
 
 const apiUrlImportFormSchema = z.object({
 	apiUrl: z.string(),
 });
 
-const urlAndKeyImportFormSchema = apiUrlImportFormSchema.merge(
-	z.object({ apiKey: z.string() }),
+const apiKeySchema = z.object({ apiKey: z.string() });
+
+const urlAndKeyImportFormSchema = apiUrlImportFormSchema.extend(
+	apiKeySchema.shape,
 );
 
+const optionalPasswordSchema = z.object({ password: z.string().optional() });
+
 const jellyfinImportFormSchema = usernameImportFormSchema
-	.merge(apiUrlImportFormSchema)
-	.merge(z.object({ password: z.string() }));
+	.extend(apiUrlImportFormSchema.shape)
+	.extend(optionalPasswordSchema.shape);
 
 const genericCsvImportFormSchema = z.object({ csvPath: z.string() });
 
@@ -174,7 +183,7 @@ const strongAppImportFormSchema = z.object({ dataExportPath: z.string() });
 
 const igdbImportFormSchema = z
 	.object({ collection: z.string() })
-	.merge(genericCsvImportFormSchema);
+	.extend(genericCsvImportFormSchema.shape);
 
 const movaryImportFormSchema = z.object({
 	ratings: z.string(),
@@ -182,7 +191,12 @@ const movaryImportFormSchema = z.object({
 	watchlist: z.string(),
 });
 
-const jsonImportFormSchema = z.object({ export: z.string() });
+const exportPathImportFormSchema = z.object({ exportPath: z.string() });
+
+const netflixImportFormSchema = z.object({
+	input: exportPathImportFormSchema,
+	profileName: z.string().optional(),
+});
 
 const malImportFormSchema = z.object({
 	animePath: z.string().optional(),
@@ -190,27 +204,31 @@ const malImportFormSchema = z.object({
 });
 
 export default function Page() {
-	const loaderData = useLoaderData<typeof loader>();
-	const coreDetails = useCoreDetails();
 	const submit = useConfirmSubmit();
+	const coreDetails = useCoreDetails();
+	const events = useApplicationEvents();
 	const { inViewport, ref } = useInViewport();
 	const userCollections = useNonHiddenUserCollections();
-	const events = useApplicationEvents();
+	const [openDrawerId, setOpenDrawerId] = useState<string | null>(null);
 	const [deployImportSource, setDeployImportSource] = useState<ImportSource>();
+
+	const fileUploadNotAllowed = !coreDetails.fileStorageEnabled;
 
 	const userImportsReportsQuery = useQuery({
 		enabled: inViewport,
 		refetchInterval: 5000,
 		queryKey: ["userImportsReports"],
-		queryFn: async () => {
-			const { userImportReports } = await clientGqlService.request(
-				UserImportReportsDocument,
-			);
-			return userImportReports;
-		},
+		queryFn: () =>
+			clientGqlService
+				.request(UserImportReportsDocument)
+				.then((u) => u.userImportReports),
 	});
 
-	const fileUploadNotAllowed = !coreDetails.fileStorageEnabled;
+	const userExportsQuery = useQuery({
+		queryKey: ["userExports"],
+		queryFn: () =>
+			clientGqlService.request(UserExportsDocument).then((u) => u.userExports),
+	});
 
 	return (
 		<Container size="xs">
@@ -221,340 +239,443 @@ export default function Page() {
 				</Tabs.List>
 				<Box mt="xl">
 					<Tabs.Panel value="import">
-						<Form
-							method="POST"
-							encType="multipart/form-data"
-							action={withQuery(".", { intent: "deployImport" })}
-							onSubmit={() => {
-								if (deployImportSource) events.deployImport(deployImportSource);
-							}}
-						>
-							<input hidden name="source" defaultValue={deployImportSource} />
-							<Stack>
-								<Title order={2}>Import data</Title>
-								<Select
-									required
-									searchable
-									id="import-source"
-									label="Select a source"
-									onChange={(v) => {
-										if (v) setDeployImportSource(v as ImportSource);
-									}}
-									data={Object.values(ImportSource).map((is) => ({
-										label: changeCase(is),
-										value: is,
-									}))}
-								/>
-								{deployImportSource ? (
-									<Anchor
-										size="xs"
-										target="_blank"
-										href={`${coreDetails.docsLink}/importing/${kebabCase(deployImportSource)}.html`}
-									>
-										Click here to see the documentation for this source
-									</Anchor>
-								) : null}
-								{deployImportSource ? (
-									<>
-										{match(deployImportSource)
-											.with(
-												ImportSource.Plex,
-												ImportSource.Mediatracker,
-												ImportSource.Audiobookshelf,
-												() => (
-													<>
-														<TextInput
-															label="Instance Url"
-															required
-															name="apiUrl"
-														/>
-														<TextInput
-															mt="sm"
-															label="API Key"
-															required
-															name="apiKey"
-														/>
-													</>
-												),
-											)
-											.with(
-												ImportSource.Hevy,
-												ImportSource.Imdb,
-												ImportSource.OpenScale,
-												ImportSource.Goodreads,
-												ImportSource.Storygraph,
-												() => (
-													<>
+						<Stack>
+							<Form
+								method="POST"
+								encType="multipart/form-data"
+								action={withQuery(".", { intent: "deployImport" })}
+							>
+								<Stack>
+									<input
+										hidden
+										name="source"
+										defaultValue={deployImportSource}
+									/>
+									<Title order={2}>Import data</Title>
+									<Select
+										required
+										searchable
+										id="import-source"
+										label="Select a source"
+										data={convertEnumToSelectData(ImportSource)}
+										onChange={(v) => setDeployImportSource(v as ImportSource)}
+									/>
+									{deployImportSource ? (
+										<Anchor
+											size="xs"
+											target="_blank"
+											href={`${coreDetails.docsLink}/importing/${kebabCase(deployImportSource)}.html`}
+										>
+											Click here to see the documentation for this source
+										</Anchor>
+									) : null}
+									{deployImportSource ? (
+										<>
+											{match(deployImportSource)
+												.with(
+													ImportSource.Plex,
+													ImportSource.Mediatracker,
+													ImportSource.Audiobookshelf,
+													() => (
+														<>
+															<TextInput
+																label="Instance Url"
+																required
+																name="apiUrl"
+															/>
+															<TextInput
+																mt="sm"
+																label="API Key"
+																required
+																name="apiKey"
+															/>
+														</>
+													),
+												)
+												.with(
+													ImportSource.Hevy,
+													ImportSource.Imdb,
+													ImportSource.OpenScale,
+													ImportSource.Goodreads,
+													ImportSource.Grouvee,
+													ImportSource.Hardcover,
+													ImportSource.Storygraph,
+													() => (
 														<FileInput
-															label="CSV file"
-															accept=".csv"
 															required
 															name="csvPath"
+															accept=".csv"
+															label="CSV file"
 														/>
-													</>
-												),
-											)
-											.with(ImportSource.StrongApp, () => (
-												<>
+													),
+												)
+												.with(ImportSource.StrongApp, () => (
 													<FileInput
 														required
 														accept=".csv"
 														label="CSV file"
 														name="dataExportPath"
 													/>
-												</>
-											))
-											.with(ImportSource.Trakt, () => (
-												<>
-													<TextInput
-														label="Username"
-														required
-														name="username"
-													/>
-												</>
-											))
-											.with(ImportSource.Jellyfin, () => (
-												<>
-													<TextInput
-														label="Instance Url"
-														required
-														name="apiUrl"
-													/>
-													<TextInput
-														label="Username"
-														required
-														name="username"
-													/>
-													<TextInput
-														mt="sm"
-														label="Password"
-														required
-														name="password"
-													/>
-												</>
-											))
-											.with(ImportSource.Movary, () => (
-												<>
-													<FileInput
-														label="History CSV file"
-														accept=".csv"
-														required
-														name="history"
-													/>
-													<FileInput
-														label="Ratings CSV file"
-														accept=".csv"
-														required
-														name="ratings"
-													/>
-													<FileInput
-														label="Watchlist CSV file"
-														accept=".csv"
-														required
-														name="watchlist"
-													/>
-												</>
-											))
-											.with(ImportSource.Igdb, () => (
-												<>
-													<Select
-														label="Collection"
-														required
-														name="collection"
-														data={userCollections.map((c) => c.name)}
-													/>
-													<FileInput
-														label="CSV File"
-														accept=".csv"
-														required
-														name="csvPath"
-													/>
-												</>
-											))
-											.with(ImportSource.Myanimelist, () => (
-												<>
-													<FileInput
-														label="Anime export file"
-														name="animePath"
-													/>
-													<FileInput
-														label="Manga export file"
-														name="mangaPath"
-													/>
-												</>
-											))
-											.with(
-												ImportSource.Anilist,
-												ImportSource.GenericJson,
-												() => (
+												))
+												.with(ImportSource.Trakt, () => (
+													<Tabs defaultValue="user" keepMounted={false}>
+														<Tabs.List>
+															<Tabs.Tab value="user">User</Tabs.Tab>
+															<Tabs.Tab value="list">List</Tabs.Tab>
+														</Tabs.List>
+														<Tabs.Panel value="user" mt="xs">
+															<TextInput
+																required
+																name="user"
+																label="The username of the Trakt user to import"
+															/>
+														</Tabs.Panel>
+														<Tabs.Panel value="list" mt="xs">
+															<Stack gap="xs">
+																<TextInput
+																	required
+																	name="list.url"
+																	label="The URL of the list to import"
+																	placeholder="https://trakt.tv/users/felix66/lists/trakt-movie-the-new-york-times-guide-to-the-best-1-000-movies-ever-made?sort=rank,asc"
+																/>
+																<Select
+																	required
+																	label="Collection"
+																	name="list.collection"
+																	data={userCollections.map((c) => c.name)}
+																/>
+															</Stack>
+														</Tabs.Panel>
+													</Tabs>
+												))
+												.with(ImportSource.Jellyfin, () => (
 													<>
-														<FileInput
-															label="JSON export file"
-															accept=".json"
+														<TextInput
 															required
-															name="export"
+															name="apiUrl"
+															label="Instance Url"
+														/>
+														<TextInput
+															required
+															name="username"
+															label="Username"
+														/>
+														<TextInput
+															mt="sm"
+															name="password"
+															label="Password"
 														/>
 													</>
-												),
-											)
-											.exhaustive()}
-										<Button
-											mt="md"
-											fullWidth
-											radius="md"
-											color="blue"
-											type="submit"
-											variant="light"
-											onClick={(e) => {
-												const form = e.currentTarget.form;
-												e.preventDefault();
-												openConfirmationModal(
-													"Are you sure you want to deploy an import job? This action is irreversible.",
-													() => submit(form),
-												);
-											}}
-										>
-											Import
-										</Button>
-									</>
-								) : null}
-								<Divider />
-								<Title order={3} ref={ref}>
-									Import history
-								</Title>
-								{userImportsReportsQuery.data ? (
-									userImportsReportsQuery.data.length > 0 ? (
-										<Accordion>
-											{userImportsReportsQuery.data.map((report) => {
-												const isInProgress =
-													typeof report.wasSuccess !== "boolean";
+												))
+												.with(ImportSource.Movary, () => (
+													<>
+														<FileInput
+															required
+															accept=".csv"
+															name="history"
+															label="History CSV file"
+														/>
+														<FileInput
+															required
+															accept=".csv"
+															name="ratings"
+															label="Ratings CSV file"
+														/>
+														<FileInput
+															required
+															accept=".csv"
+															name="watchlist"
+															label="Watchlist CSV file"
+														/>
+													</>
+												))
+												.with(ImportSource.Igdb, () => (
+													<>
+														<Select
+															required
+															name="collection"
+															label="Collection"
+															data={userCollections.map((c) => c.name)}
+														/>
+														<FileInput
+															required
+															accept=".csv"
+															name="csvPath"
+															label="CSV File"
+														/>
+													</>
+												))
+												.with(ImportSource.Myanimelist, () => (
+													<>
+														<FileInput
+															name="animePath"
+															label="Anime export file"
+														/>
+														<FileInput
+															name="mangaPath"
+															label="Manga export file"
+														/>
+													</>
+												))
+												.with(
+													ImportSource.Anilist,
+													ImportSource.GenericJson,
+													() => (
+														<FileInput
+															required
+															accept=".json"
+															name="exportPath"
+															label="JSON export file"
+														/>
+													),
+												)
+												.with(ImportSource.Netflix, () => (
+													<>
+														<FileInput
+															required
+															accept=".zip"
+															name="input.exportPath"
+															label="Netflix ZIP export file"
+														/>
+														<TextInput
+															name="profileName"
+															label="Profile Name"
+															description="Filter import to a specific Netflix profile"
+														/>
+													</>
+												))
+												.exhaustive()}
+											<Button
+												mt="md"
+												fullWidth
+												radius="md"
+												color="blue"
+												type="submit"
+												variant="light"
+												onClick={(e) => {
+													const form = e.currentTarget.form;
+													e.preventDefault();
+													openConfirmationModal(
+														"Are you sure you want to deploy an import job? This action is irreversible.",
+														() => {
+															submit(form);
+															events.deployImport(deployImportSource);
+														},
+													);
+												}}
+											>
+												Import
+											</Button>
+										</>
+									) : null}
+								</Stack>
+							</Form>
+							<Divider />
+							<Title order={3} ref={ref}>
+								Import history
+							</Title>
+							{userImportsReportsQuery.data ? (
+								userImportsReportsQuery.data.length > 0 ? (
+									<Stack>
+										{userImportsReportsQuery.data.map((report) => {
+											const isInProgress =
+												typeof report.wasSuccess !== "boolean";
 
-												return (
-													<Accordion.Item
-														key={report.id}
-														value={report.id}
-														data-import-report-id={report.id}
-													>
-														<Accordion.Control disabled={isInProgress}>
-															<Stack gap="xs">
-																<Box>
-																	<Indicator
-																		inline
-																		size={12}
-																		offset={-3}
-																		processing={isInProgress}
-																		color={
-																			isInProgress
-																				? undefined
-																				: report.wasSuccess
-																					? "green"
-																					: "red"
-																		}
-																	>
-																		{changeCase(report.source)}{" "}
-																		<Text size="xs" span c="dimmed">
-																			({dayjsLib(report.startedOn).fromNow()})
+											return (
+												<Paper
+													p="md"
+													withBorder
+													key={report.id}
+													data-import-report-id={report.id}
+												>
+													<Group justify="space-between" wrap="nowrap">
+														<Stack gap="xs" flex={1} miw={0}>
+															<Box>
+																<Indicator
+																	inline
+																	size={12}
+																	zIndex={0}
+																	offset={-3}
+																	processing={isInProgress}
+																	color={
+																		isInProgress
+																			? undefined
+																			: report.wasSuccess
+																				? "green"
+																				: "red"
+																	}
+																>
+																	{changeCase(report.source)}{" "}
+																	<Text size="xs" span c="dimmed">
+																		({dayjsLib(report.startedOn).fromNow()})
+																	</Text>
+																</Indicator>
+															</Box>
+															{isInProgress && report.progress ? (
+																<>
+																	<Box>
+																		<Text span fw="bold" mr={4}>
+																			Estimated to finish at:
 																		</Text>
-																	</Indicator>
-																</Box>
-																{isInProgress && report.progress ? (
-																	<>
+																		{dayjsLib(
+																			report.estimatedFinishTime,
+																		).format("lll")}
+																	</Box>
+																	<Group wrap="nowrap">
+																		<Progress
+																			flex={1}
+																			animated
+																			value={Number(report.progress)}
+																		/>
+																		<Text size="xs">
+																			{Number.parseFloat(
+																				report.progress,
+																			).toFixed(3)}
+																			%
+																		</Text>
+																	</Group>
+																</>
+															) : null}
+														</Stack>
+														{!isInProgress && (
+															<ActionIcon
+																color="blue"
+																variant="transparent"
+																onClick={() => setOpenDrawerId(report.id)}
+															>
+																<IconEye />
+															</ActionIcon>
+														)}
+													</Group>
+													<Drawer
+														size="xl"
+														position="bottom"
+														opened={openDrawerId === report.id}
+														onClose={() => setOpenDrawerId(null)}
+														title={`${changeCase(report.source)} Import Details`}
+													>
+														<Stack>
+															<Box>
+																<Group>
+																	{report.details ? (
 																		<Box>
 																			<Text span fw="bold" mr={4}>
-																				Estimated to finish at:
+																				Total imported:
 																			</Text>
-																			{dayjsLib(
-																				report.estimatedFinishTime,
-																			).format("lll")}
+																			{report.details.import.total},
 																		</Box>
-																		<Group wrap="nowrap">
-																			<Progress
-																				flex={1}
-																				animated
-																				value={Number(report.progress)}
-																			/>
-																			<Text size="xs">
-																				{Number.parseFloat(
-																					report.progress,
-																				).toFixed(3)}
-																				%
+																	) : null}
+																	<Box>
+																		<Text span fw="bold" mr={4}>
+																			Started at:
+																		</Text>
+																		{dayjsLib(report.startedOn).format("lll")}
+																	</Box>
+																</Group>
+																<Group>
+																	<Box>
+																		{report.finishedOn ? (
+																			<>
+																				<Text span fw="bold" mr={4}>
+																					Finished on:
+																				</Text>
+																				{dayjsLib(report.finishedOn).format(
+																					"lll",
+																				)}
+																			</>
+																		) : null}
+																	</Box>
+																	{report.details ? (
+																		<Box>
+																			<Text span fw="bold" mr={4}>
+																				Failed:
 																			</Text>
-																		</Group>
-																	</>
-																) : null}
-															</Stack>
-														</Accordion.Control>
-														<Accordion.Panel
-															styles={{ content: { paddingTop: 0 } }}
-														>
-															<Stack>
+																			{report.details.failedItems.length}
+																		</Box>
+																	) : null}
+																</Group>
+															</Box>
+															{report.details &&
+															report.details.failedItems.length > 0 ? (
 																<Box>
-																	<Group>
-																		{report.details ? (
-																			<Box>
-																				<Text span fw="bold" mr={4}>
-																					Total imported:
-																				</Text>
-																				{report.details.import.total},
-																			</Box>
-																		) : null}
-																		<Box>
-																			<Text span fw="bold" mr={4}>
-																				Started at:
-																			</Text>
-																			{dayjsLib(report.startedOn).format("lll")}
-																		</Box>
+																	<Group justify="space-between" mb="md">
+																		<Title order={4}>Failed Items</Title>
+																		<Tooltip label="Download errors">
+																			<ActionIcon
+																				color="blue"
+																				variant="light"
+																				onClick={() => {
+																					if (!report.details) return;
+																					const json = JSON.stringify(
+																						report.details.failedItems,
+																						null,
+																						2,
+																					);
+																					const blob = new Blob([json], {
+																						type: "application/json",
+																					});
+																					const url = URL.createObjectURL(blob);
+																					const link =
+																						document.createElement("a");
+																					link.href = url;
+																					link.download = `failed-items-${report.id}.json`;
+																					document.body.appendChild(link);
+																					link.click();
+																					document.body.removeChild(link);
+																					URL.revokeObjectURL(url);
+																				}}
+																			>
+																				<IconDownload />
+																			</ActionIcon>
+																		</Tooltip>
 																	</Group>
-																	<Group>
-																		<Box>
-																			{report.finishedOn ? (
-																				<>
-																					<Text span fw="bold" mr={4}>
-																						Finished on:
-																					</Text>
-																					{dayjsLib(report.finishedOn).format(
-																						"lll",
-																					)}
-																				</>
-																			) : null}
-																		</Box>
-																		{report.details ? (
-																			<Box>
-																				<Text span fw="bold" mr={4}>
-																					Failed:
-																				</Text>
-																				{report.details.failedItems.length}
-																			</Box>
-																		) : null}
-																	</Group>
-																</Box>
-																{report.details &&
-																report.details.failedItems.length > 0 ? (
-																	<CodeHighlight
-																		mah={400}
-																		language="json"
-																		style={{ overflow: "scroll" }}
-																		code={JSON.stringify(
-																			report.details.failedItems,
-																			null,
-																			2,
-																		)}
+																	<DataTable
+																		height={500}
+																		withTableBorder
+																		borderRadius="sm"
+																		withColumnBorders
+																		records={report.details.failedItems}
+																		columns={[
+																			{
+																				title: "Identifier",
+																				accessor: "identifier",
+																			},
+																			{
+																				title: "Step",
+																				accessor: "step",
+																				render: (record) =>
+																					changeCase(record.step),
+																			},
+																			{
+																				title: "Error",
+																				accessor: "error",
+																				render: (record) => record.error || "-",
+																			},
+																			{
+																				title: "Type",
+																				accessor: "lot",
+																				render: (record) =>
+																					record.lot
+																						? changeCase(record.lot)
+																						: "-",
+																			},
+																		]}
 																	/>
-																) : null}
-															</Stack>
-														</Accordion.Panel>
-													</Accordion.Item>
-												);
-											})}
-										</Accordion>
-									) : (
-										<Text>You have not performed any imports</Text>
-									)
+																</Box>
+															) : null}
+														</Stack>
+													</Drawer>
+												</Paper>
+											);
+										})}
+									</Stack>
 								) : (
-									<Skeleton h={80} w="100%" />
-								)}
-							</Stack>
-						</Form>
+									<Text>You have not performed any imports</Text>
+								)
+							) : (
+								<SkeletonLoader />
+							)}
+						</Stack>
 					</Tabs.Panel>
 					<Tabs.Panel value="export">
 						<Stack>
@@ -562,8 +683,8 @@ export default function Page() {
 								<Title order={2}>Export data</Title>
 								<Anchor
 									size="xs"
-									href={`${coreDetails.docsLink}/guides/exporting.html`}
 									target="_blank"
+									href={`${coreDetails.docsLink}/exporting.html`}
 								>
 									Docs
 								</Anchor>
@@ -597,59 +718,22 @@ export default function Page() {
 							</Form>
 							<Divider />
 							<Title order={3}>Export history</Title>
-							{loaderData.userExports.length > 0 ? (
-								<Stack>
-									{loaderData.userExports.map((exp) => (
-										<Box key={exp.startedAt} w="100%">
-											<Group justify="space-between" wrap="nowrap">
-												<Group gap="xs">
-													<Text span size="lg">
-														{changeCase(dayjsLib(exp.endedAt).fromNow())}
-													</Text>
-													<Text span size="xs" c="dimmed">
-														({filesize(exp.size)})
-													</Text>
-												</Group>
-												<Group>
-													<Anchor
-														href={exp.url}
-														target="_blank"
-														rel="noreferrer"
-													>
-														<ThemeIcon color="blue" variant="transparent">
-															<IconDownload />
-														</ThemeIcon>
-													</Anchor>
-													<Form
-														method="POST"
-														action={withQuery($path("/actions"), {
-															intent: "deleteS3Asset",
-														})}
-													>
-														<input hidden name="key" defaultValue={exp.key} />
-														<ActionIcon
-															color="red"
-															type="submit"
-															variant="transparent"
-															onClick={(e) => {
-																const form = e.currentTarget.form;
-																e.preventDefault();
-																openConfirmationModal(
-																	"Are you sure you want to delete this export? This action is irreversible.",
-																	() => submit(form),
-																);
-															}}
-														>
-															<IconTrash />
-														</ActionIcon>
-													</Form>
-												</Group>
-											</Group>
-										</Box>
-									))}
-								</Stack>
+							{userExportsQuery.data ? (
+								userExportsQuery.data.length > 0 ? (
+									<Stack>
+										{userExportsQuery.data.map((exp) => (
+											<DisplayExport
+												item={exp}
+												key={exp.key}
+												refetch={userExportsQuery.refetch}
+											/>
+										))}
+									</Stack>
+								) : (
+									<Text>You have not performed any exports</Text>
+								)
 							) : (
-								<Text>You have not performed any exports</Text>
+								<SkeletonLoader />
 							)}
 						</Stack>
 					</Tabs.Panel>
@@ -658,3 +742,62 @@ export default function Page() {
 		</Container>
 	);
 }
+
+type ExportItemProps = {
+	refetch: () => void;
+	item: UserExportsQuery["userExports"][number];
+};
+
+const DisplayExport = (props: ExportItemProps) => {
+	const deleteS3AssetMutation = useDeleteS3AssetMutation();
+
+	const duration = useMemo(() => {
+		const seconds = dayjsLib(props.item.endedAt).diff(
+			dayjsLib(props.item.startedAt),
+			"second",
+		);
+		if (seconds < 60) return `${seconds}s`;
+		const minutes = Math.floor(seconds / 60);
+		const remainingSeconds = seconds % 60;
+		return `${minutes}m ${remainingSeconds}s`;
+	}, [props.item.startedAt, props.item.endedAt]);
+
+	return (
+		<Paper withBorder p={{ base: "sm", md: "md" }}>
+			<Group justify="space-between" wrap="wrap">
+				<Stack gap="xs" flex={1} miw={0}>
+					<Text span>
+						{dayjsLib(props.item.startedAt).format("MMM DD, YYYY [at] h:mm A")}
+					</Text>
+					<Text span size="xs" c="dimmed">
+						(Took {duration}, {filesize(props.item.size)})
+					</Text>
+				</Stack>
+				<Group>
+					<Anchor href={props.item.url} target="_blank" rel="noreferrer">
+						<ThemeIcon color="blue" variant="transparent">
+							<IconDownload />
+						</ThemeIcon>
+					</Anchor>
+					<ActionIcon
+						color="red"
+						variant="transparent"
+						disabled={deleteS3AssetMutation.isPending}
+						onClick={() => {
+							openConfirmationModal(
+								"Are you sure you want to delete this export? This action is irreversible.",
+								() => {
+									deleteS3AssetMutation
+										.mutateAsync(props.item.key)
+										.then(() => props.refetch());
+								},
+							);
+						}}
+					>
+						<IconTrash />
+					</ActionIcon>
+				</Group>
+			</Group>
+		</Paper>
+	);
+};

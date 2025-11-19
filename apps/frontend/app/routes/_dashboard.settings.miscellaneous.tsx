@@ -7,21 +7,32 @@ import {
 	Text,
 	Title,
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import {
 	BackgroundJob,
 	DeployBackgroundJobDocument,
+	GenerateLogDownloadUrlDocument,
 	UserLot,
 } from "@ryot/generated/graphql/backend/graphql";
 import { processSubmission } from "@ryot/ts-utils";
-import { Form, data } from "react-router";
+import { useMutation } from "@tanstack/react-query";
+import type { ComponentPropsWithoutRef } from "react";
+import { Form, data, useNavigate } from "react-router";
+import { ClientOnly } from "remix-utils/client-only";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { openConfirmationModal } from "~/lib/common";
 import {
 	useConfirmSubmit,
 	useDashboardLayoutData,
+	useInvalidateUserDetails,
+	useIsMobile,
+	useIsOnboardingTourCompleted,
+	useMarkUserOnboardingTourStatus,
 	useUserDetails,
-} from "~/lib/hooks";
+} from "~/lib/shared/hooks";
+import { clientGqlService } from "~/lib/shared/react-query";
+import { openConfirmationModal } from "~/lib/shared/ui-utils";
+import { useOnboardingTour } from "~/lib/state/onboarding-tour";
 import { createToastHeaders, serverGqlService } from "~/lib/utilities.server";
 import type { Route } from "./+types/_dashboard.settings.miscellaneous";
 
@@ -46,10 +57,16 @@ export const action = async ({ request }: Route.ActionArgs) => {
 };
 
 const jobSchema = z.object({
-	jobName: z.nativeEnum(BackgroundJob),
+	jobName: z.enum(BackgroundJob),
 });
 
 export default function Page() {
+	const navigate = useNavigate();
+	const isMobile = useIsMobile();
+	const { startOnboardingTour } = useOnboardingTour();
+	const isOnboardingTourCompleted = useIsOnboardingTourCompleted();
+	const markUserOnboardingStatus = useMarkUserOnboardingTourStatus();
+
 	return (
 		<Container size="lg">
 			<Stack>
@@ -61,11 +78,47 @@ export default function Page() {
 					{Object.values(BackgroundJob).map((job) => (
 						<DisplayJobBtn key={job} job={job} />
 					))}
+					<DownloadLogsButton />
+					<ClientOnly>
+						{() =>
+							isOnboardingTourCompleted && !isMobile ? (
+								<SettingsActionCard
+									title="Onboarding"
+									buttonText="Restart onboarding"
+									description="Restart the application onboarding tour."
+									buttonProps={{
+										onClick: async () => {
+											await startOnboardingTour();
+											await markUserOnboardingStatus.mutateAsync(false);
+											navigate("/");
+										},
+									}}
+								/>
+							) : null
+						}
+					</ClientOnly>
 				</SimpleGrid>
 			</Stack>
 		</Container>
 	);
 }
+
+const SettingsActionCard = (props: {
+	title: string;
+	buttonText: string;
+	description: string;
+	buttonProps?: ComponentPropsWithoutRef<typeof Button>;
+}) => (
+	<Stack>
+		<Box>
+			<Title order={4}>{props.title}</Title>
+			<Text>{props.description}</Text>
+		</Box>
+		<Button mt="auto" variant="light" {...props.buttonProps}>
+			{props.buttonText}
+		</Button>
+	</Stack>
+);
 
 const getJobDetails = (job: BackgroundJob) =>
 	match(job)
@@ -123,10 +176,11 @@ const getJobDetails = (job: BackgroundJob) =>
 		.exhaustive();
 
 const DisplayJobBtn = (props: { job: BackgroundJob }) => {
+	const submit = useConfirmSubmit();
 	const userDetails = useUserDetails();
 	const dashboardData = useDashboardLayoutData();
 	const isEditDisabled = dashboardData.isDemoInstance;
-	const submit = useConfirmSubmit();
+	const invalidateUserDetails = useInvalidateUserDetails();
 
 	const [title, description, isAdminOnly] = getJobDetails(props.job);
 
@@ -135,28 +189,72 @@ const DisplayJobBtn = (props: { job: BackgroundJob }) => {
 	return (
 		<Form replace method="POST">
 			<input hidden name="jobName" defaultValue={props.job} />
-			<Stack>
-				<Box>
-					<Title order={4}>{title}</Title>
-					<Text>{description}</Text>
-				</Box>
-				<Button
-					mt="auto"
-					type="submit"
-					variant="light"
-					disabled={isEditDisabled}
-					onClick={(e) => {
+			<SettingsActionCard
+				title={title}
+				buttonText={title}
+				description={description}
+				buttonProps={{
+					type: "submit",
+					disabled: isEditDisabled,
+					onClick: (e: React.MouseEvent<HTMLButtonElement>) => {
 						const form = e.currentTarget.form;
 						e.preventDefault();
 						openConfirmationModal(
 							"Are you sure you want to perform this task?",
-							() => submit(form),
+							async () => {
+								submit(form);
+								await invalidateUserDetails();
+							},
 						);
-					}}
-				>
-					{title}
-				</Button>
-			</Stack>
+					},
+				}}
+			/>
 		</Form>
+	);
+};
+
+const DownloadLogsButton = () => {
+	const userDetails = useUserDetails();
+	const dashboardData = useDashboardLayoutData();
+	const isEditDisabled = dashboardData.isDemoInstance;
+
+	const downloadLogsMutation = useMutation({
+		mutationFn: async () => {
+			const { generateLogDownloadUrl } = await clientGqlService.request(
+				GenerateLogDownloadUrlDocument,
+				{},
+			);
+			return generateLogDownloadUrl;
+		},
+		onSuccess: (downloadUrl) => {
+			window.open(downloadUrl, "_blank", "noopener,noreferrer");
+			notifications.show({
+				color: "green",
+				title: "Success",
+				message: "Opening log download in a new tab",
+			});
+		},
+		onError: () => {
+			notifications.show({
+				color: "red",
+				title: "Error",
+				message: "Failed to generate log download URL",
+			});
+		},
+	});
+
+	if (userDetails.lot !== UserLot.Admin) return null;
+
+	return (
+		<SettingsActionCard
+			title="Download Logs"
+			buttonText="Download Logs"
+			description="Download application logs for debugging and troubleshooting purposes."
+			buttonProps={{
+				disabled: isEditDisabled,
+				loading: downloadLogsMutation.isPending,
+				onClick: () => downloadLogsMutation.mutate(),
+			}}
+		/>
 	);
 };

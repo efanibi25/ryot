@@ -1,188 +1,73 @@
 import {
 	ActionIcon,
 	Avatar,
-	Box,
+	Badge,
 	Button,
 	Container,
 	Flex,
 	Group,
 	Modal,
-	Paper,
-	PasswordInput,
-	SimpleGrid,
 	Stack,
-	Switch,
 	Text,
 	TextInput,
 	Title,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
 import {
 	DeleteUserDocument,
-	RegisterErrorVariant,
+	GetPasswordChangeSessionDocument,
 	RegisterUserDocument,
+	ResetUserDocument,
 	UpdateUserDocument,
+	type UpdateUserInput,
 	UserLot,
-	UsersListDocument,
 	type UsersListQuery,
 } from "@ryot/generated/graphql/backend/graphql";
+import { changeCase } from "@ryot/ts-utils";
 import {
-	changeCase,
-	getActionIntent,
-	parseSearchQuery,
-	processSubmission,
-	truncate,
-	zodCheckboxAsString,
-} from "@ryot/ts-utils";
-import {
-	IconPencil,
+	IconKey,
 	IconPlus,
-	IconRefresh,
+	IconRotateClockwise,
 	IconTrash,
+	IconUserOff,
 } from "@tabler/icons-react";
-import { nanoid } from "nanoid";
-import { forwardRef, useState } from "react";
-import { Form, data, redirect, useLoaderData } from "react-router";
-import { VirtuosoGrid } from "react-virtuoso";
+import { useMutation } from "@tanstack/react-query";
+import { DataTable } from "mantine-datatable";
+import { useState } from "react";
+import { useNavigate } from "react-router";
 import { $path } from "safe-routes";
-import { match } from "ts-pattern";
 import { withQuery } from "ufo";
-import { z } from "zod";
-import { DebouncedSearchInput } from "~/components/common";
-import { openConfirmationModal } from "~/lib/common";
-import { useConfirmSubmit, useCoreDetails } from "~/lib/hooks";
+import { CopyableTextInput } from "~/components/common";
+import { DebouncedSearchInput } from "~/components/common/filters";
+import { redirectToQueryParam } from "~/lib/shared/constants";
+import { useUserDetails, useUsersList } from "~/lib/shared/hooks";
 import {
-	createToastHeaders,
-	getSearchEnhancedCookieName,
-	redirectIfNotAuthenticatedOrUpdated,
-	redirectUsingEnhancedCookieSearchParams,
-	serverGqlService,
-} from "~/lib/utilities.server";
-import type { Route } from "./+types/_dashboard.settings.users";
-
-const searchParamsSchema = z.object({
-	query: z.string().optional(),
-});
-
-export type SearchParams = z.infer<typeof searchParamsSchema>;
-
-export const loader = async ({ request }: Route.LoaderArgs) => {
-	const userDetails = await redirectIfNotAuthenticatedOrUpdated(request);
-	if (userDetails.lot !== UserLot.Admin) throw redirect($path("/"));
-	const cookieName = await getSearchEnhancedCookieName(
-		"settings.users",
-		request,
-	);
-	await redirectUsingEnhancedCookieSearchParams(request, cookieName);
-	const query = parseSearchQuery(request, searchParamsSchema);
-	const [{ usersList }] = await Promise.all([
-		serverGqlService.authenticatedRequest(request, UsersListDocument, {
-			query: query.query,
-		}),
-	]);
-	return { usersList, query, cookieName };
-};
-
-export const meta = () => {
-	return [{ title: "User Settings | Ryot" }];
-};
-
-export const action = async ({ request }: Route.ActionArgs) => {
-	const formData = await request.clone().formData();
-	const intent = getActionIntent(request);
-	return await match(intent)
-		.with("delete", async () => {
-			const submission = processSubmission(formData, deleteSchema);
-			const { deleteUser } = await serverGqlService.authenticatedRequest(
-				request,
-				DeleteUserDocument,
-				submission,
-			);
-			return data({ status: "success", submission } as const, {
-				headers: await createToastHeaders({
-					type: deleteUser ? "success" : "error",
-					message: deleteUser
-						? "User deleted successfully"
-						: "User can not be deleted",
-				}),
-			});
-		})
-		.with("registerNew", async () => {
-			const submission = processSubmission(formData, registerFormSchema);
-			const { registerUser } = await serverGqlService.authenticatedRequest(
-				request,
-				RegisterUserDocument,
-				{
-					input: {
-						adminAccessToken: submission.adminAccessToken,
-						data: {
-							password: {
-								password: submission.password,
-								username: submission.username,
-							},
-						},
-					},
-				},
-			);
-			const success = registerUser.__typename === "StringIdObject";
-			return data({ status: "success", submission } as const, {
-				headers: await createToastHeaders({
-					type: success ? "success" : "error",
-					message: success
-						? "User registered successfully"
-						: match(registerUser.error)
-								.with(
-									RegisterErrorVariant.Disabled,
-									() => "Registration is disabled",
-								)
-								.with(
-									RegisterErrorVariant.IdentifierAlreadyExists,
-									() => "Username already exists",
-								)
-								.exhaustive(),
-				}),
-			});
-		})
-		.with("update", async () => {
-			const submission = processSubmission(formData, updateUserSchema);
-			submission.isDisabled = submission.isDisabled === true;
-			await serverGqlService.authenticatedRequest(request, UpdateUserDocument, {
-				input: submission,
-			});
-			return data({ status: "success", submission } as const, {
-				headers: await createToastHeaders({
-					type: "success",
-					message: "User updated successfully",
-				}),
-			});
-		})
-		.run();
-};
-
-const registerFormSchema = z.object({
-	username: z.string(),
-	password: z.string(),
-	adminAccessToken: z.string().optional(),
-});
-
-const deleteSchema = z.object({ toDeleteUserId: z.string() });
-
-const updateUserSchema = z.object({
-	userId: z.string(),
-	adminAccessToken: z.string(),
-	password: z.string().optional(),
-	lot: z.nativeEnum(UserLot).optional(),
-	isDisabled: zodCheckboxAsString.optional(),
-});
+	clientGqlService,
+	queryClient,
+	queryFactory,
+} from "~/lib/shared/react-query";
+import { openConfirmationModal } from "~/lib/shared/ui-utils";
 
 export default function Page() {
-	const loaderData = useLoaderData<typeof loader>();
-	const coreDetails = useCoreDetails();
 	const [
 		registerUserModalOpened,
 		{ open: openRegisterUserModal, close: closeRegisterUserModal },
 	] = useDisclosure(false);
-	const [password, setPassword] = useState("");
+	const [urlDisplayData, setUrlDisplayData] = useState<UrlDisplayData | null>(
+		null,
+	);
+	const [query, setQuery] = useState("");
+
+	const { data: usersList } = useUsersList(query);
+
+	const handleCloseUrlDisplayModal = () => {
+		setUrlDisplayData(null);
+	};
+
+	const handleInvitationSuccess = (data: UrlDisplayData) => {
+		setUrlDisplayData(data);
+	};
 
 	return (
 		<Container size="lg">
@@ -192,68 +77,94 @@ export default function Page() {
 					<ActionIcon
 						color="green"
 						variant="outline"
-						onClick={() => {
-							openRegisterUserModal();
-						}}
+						onClick={openRegisterUserModal}
 					>
 						<IconPlus size={20} />
 					</ActionIcon>
 				</Flex>
-				<Modal
+				<UserInvitationModal
 					opened={registerUserModalOpened}
 					onClose={closeRegisterUserModal}
-					withCloseButton={false}
-					centered
-				>
-					<Form
-						replace
-						method="POST"
-						onSubmit={closeRegisterUserModal}
-						action={withQuery(".", { intent: "registerNew" })}
-					>
-						<Stack>
-							<Title order={3}>Create User</Title>
-							<TextInput label="Name" required name="username" />
-							<TextInput
-								required
-								name="password"
-								label="Password"
-								value={password}
-								onChange={(e) => setPassword(e.currentTarget.value)}
-								rightSection={
-									<ActionIcon onClick={() => setPassword(nanoid(7))}>
-										<IconRefresh size={16} />
-									</ActionIcon>
-								}
-							/>
-							{!coreDetails.signupAllowed ? (
-								<TextInput
-									required
-									name="adminAccessToken"
-									label="Admin Access Token"
-									description="This is required as registration is disabled"
-								/>
-							) : null}
-							<Button variant="outline" type="submit">
-								Create
-							</Button>
-						</Stack>
-					</Form>
-				</Modal>
-				<DebouncedSearchInput
-					placeholder="Search by name or ID"
-					initialValue={loaderData.query.query}
-					enhancedQueryParams={loaderData.cookieName}
+					onSuccess={handleInvitationSuccess}
 				/>
-				<VirtuosoGrid
-					components={{
-						List: forwardRef((props, ref) => (
-							<SimpleGrid ref={ref} {...props} cols={{ md: 2, xl: 3 }} />
-						)),
-					}}
-					style={{ height: "70vh" }}
-					totalCount={loaderData.usersList.length}
-					itemContent={(index) => <UserDisplay index={index} />}
+				<DebouncedSearchInput
+					value={query}
+					onChange={(q) => setQuery(q)}
+					placeholder="Search by name or ID"
+				/>
+				<DataTable
+					height={600}
+					borderRadius="sm"
+					withColumnBorders
+					records={usersList}
+					withTableBorder={false}
+					columns={[
+						{
+							accessor: "id",
+							title: "User ID",
+							render: ({ id, name }) => (
+								<Group wrap="nowrap">
+									<Avatar name={name} size="sm" />
+
+									<Text size="sm" c="dimmed">
+										{id}
+									</Text>
+								</Group>
+							),
+						},
+						{
+							title: "Name",
+							accessor: "name",
+							render: ({ name }) => (
+								<Text fw="bold" truncate>
+									{name}
+								</Text>
+							),
+						},
+						{
+							title: "Role",
+							accessor: "lot",
+							render: ({ lot }) => (
+								<Badge
+									size="sm"
+									variant="light"
+									color={lot === UserLot.Admin ? "red" : "blue"}
+								>
+									{changeCase(lot)}
+								</Badge>
+							),
+						},
+						{
+							title: "Status",
+							accessor: "isDisabled",
+							render: ({ isDisabled }) => (
+								<Badge
+									size="sm"
+									color={isDisabled ? "red" : "green"}
+									variant="light"
+								>
+									{isDisabled ? "Disabled" : "Active"}
+								</Badge>
+							),
+						},
+						{
+							width: 200,
+							title: "Actions",
+							accessor: "actions",
+							textAlign: "center",
+							render: (user) => (
+								<UserActions
+									user={user}
+									setUrlDisplayData={setUrlDisplayData}
+								/>
+							),
+						},
+					]}
+				/>
+				<UrlDisplayModal
+					data={urlDisplayData}
+					opened={urlDisplayData !== null}
+					onClose={handleCloseUrlDisplayModal}
 				/>
 			</Stack>
 		</Container>
@@ -262,101 +173,311 @@ export default function Page() {
 
 type User = UsersListQuery["usersList"][number];
 
-const UserDisplay = (props: { index: number }) => {
-	const loaderData = useLoaderData<typeof loader>();
-	const user = loaderData.usersList[props.index];
-	const submit = useConfirmSubmit();
-	const [updateUserData, setUpdateUserData] = useState<User | null>(null);
+const UserActions = (props: {
+	user: User;
+	setUrlDisplayData: (data: UrlDisplayData) => void;
+}) => {
+	const userDetails = useUserDetails();
+	const navigate = useNavigate();
 
-	if (!user) return null;
+	const toggleUserStatusMutation = useMutation({
+		mutationFn: async (input: UpdateUserInput) => {
+			const { updateUser } = await clientGqlService.request(
+				UpdateUserDocument,
+				{ input },
+			);
+			return { updateUser, input };
+		},
+		onSuccess: async ({ input }) => {
+			invalidateUsersList();
+			const isCurrentUser = input.userId === userDetails.id;
+			showSuccessNotification("User status updated successfully");
+			if (isCurrentUser && input.isDisabled) {
+				handleCurrentUserLogout(navigate);
+			}
+		},
+		onError: () => showErrorNotification("Failed to update user status"),
+	});
+
+	const deleteUserMutation = useMutation({
+		mutationFn: async (toDeleteUserId: string) => {
+			const { deleteUser } = await clientGqlService.request(
+				DeleteUserDocument,
+				{ toDeleteUserId },
+			);
+			return deleteUser;
+		},
+		onSuccess: async (deleteUser) => {
+			invalidateUsersList();
+			const message = deleteUser
+				? "User deleted successfully"
+				: "User cannot be deleted";
+			const color = deleteUser ? "green" : "red";
+			notifications.show({
+				color,
+				message,
+				title: deleteUser ? "Success" : "Error",
+			});
+		},
+		onError: () => showErrorNotification("Failed to delete user"),
+	});
+
+	const resetUserMutation = useMutation({
+		onError: () => showErrorNotification("Failed to reset user"),
+		mutationFn: async (toResetUserId: string) => {
+			const { resetUser } = await clientGqlService.request(ResetUserDocument, {
+				toResetUserId,
+			});
+			return resetUser;
+		},
+		onSuccess: async (resetUser) => {
+			if (resetUser.__typename !== "UserResetResponse") return;
+			invalidateUsersList();
+			const isCurrentUser = props.user.id === userDetails.id;
+			if (resetUser.passwordChangeUrl) {
+				if (!isCurrentUser) {
+					props.setUrlDisplayData({
+						title: "Password Reset Link",
+						url: resetUser.passwordChangeUrl,
+						description: "Share this URL with the user to reset their password",
+					});
+				}
+				showSuccessNotification("User reset successfully");
+			} else {
+				showSuccessNotification("User password reset successfully");
+			}
+			if (isCurrentUser && resetUser.passwordChangeUrl) {
+				handleCurrentUserLogout(navigate, resetUser.passwordChangeUrl);
+			}
+		},
+	});
+
+	const getPasswordChangeSessionMutation = useMutation({
+		onError: () =>
+			showErrorNotification("Failed to get password change session"),
+		mutationFn: async (userId: string) => {
+			const { getPasswordChangeSession } = await clientGqlService.request(
+				GetPasswordChangeSessionDocument,
+				{ input: { userId } },
+			);
+			return getPasswordChangeSession.passwordChangeUrl;
+		},
+		onSuccess: async (passwordChangeUrl) => {
+			props.setUrlDisplayData({
+				url: passwordChangeUrl,
+				title: "Password Change Link",
+				description: "Share this URL with the user to change their password",
+			});
+			showSuccessNotification("Password change session created successfully");
+		},
+	});
 
 	return (
-		<Paper p="xs" withBorder key={user.id} data-user-id={user.id}>
-			<UpdateUserModal
-				updateUserData={updateUserData}
-				closeIntegrationModal={() => setUpdateUserData(null)}
-			/>
-			<Flex align="center" justify="space-between">
-				<Group wrap="nowrap">
-					<Avatar name={user.name} />
-					<Box>
-						<Text lineClamp={1} fw="bold">
-							{truncate(user.name, { length: 20 })}
-						</Text>
-						<Text size="xs">
-							Role: {changeCase(user.lot)}
-							{user.isDisabled ? ", Status: Disabled" : null}
-						</Text>
-					</Box>
-				</Group>
-				<Group>
-					<ActionIcon
-						color="indigo"
-						variant="subtle"
-						onClick={() => setUpdateUserData(user)}
-					>
-						<IconPencil />
-					</ActionIcon>
-					<Form method="POST" action={withQuery(".", { intent: "delete" })}>
-						<input hidden name="toDeleteUserId" defaultValue={user.id} />
-						<ActionIcon
-							color="red"
-							type="submit"
-							variant="subtle"
-							onClick={(e) => {
-								const form = e.currentTarget.form;
-								e.preventDefault();
-								openConfirmationModal(
-									"Are you sure you want to delete this user?",
-									() => submit(form),
-								);
-							}}
-						>
-							<IconTrash />
-						</ActionIcon>
-					</Form>
-				</Group>
-			</Flex>
-		</Paper>
+		<Group justify="center">
+			<ActionIcon
+				variant="subtle"
+				loading={toggleUserStatusMutation.isPending}
+				color={props.user.isDisabled ? "green" : "yellow"}
+				onClick={() => {
+					const action = props.user.isDisabled ? "enable" : "disable";
+					const newStatus = !props.user.isDisabled;
+					const isCurrentUser = props.user.id === userDetails.id;
+					const confirmationMessage =
+						isCurrentUser && newStatus
+							? `Are you sure you want to ${action} your own account? You will be logged out immediately and unable to log in until an admin re-enables your account.`
+							: `Are you sure you want to ${action} this user? ${newStatus ? "The user will be unable to log in." : "The user will be able to log in again."}`;
+
+					openConfirmationModal(confirmationMessage, () =>
+						toggleUserStatusMutation.mutate({
+							userId: props.user.id,
+							isDisabled: newStatus,
+						}),
+					);
+				}}
+			>
+				<IconUserOff size={18} />
+			</ActionIcon>
+			<ActionIcon
+				color="cyan"
+				variant="subtle"
+				loading={getPasswordChangeSessionMutation.isPending}
+				onClick={() => {
+					openConfirmationModal(
+						"Are you sure you want to generate a password change session for this user? This will create a one-time link that allows them to change their password.",
+						() => getPasswordChangeSessionMutation.mutate(props.user.id),
+					);
+				}}
+			>
+				<IconKey size={18} />
+			</ActionIcon>
+			<ActionIcon
+				color="orange"
+				variant="subtle"
+				loading={resetUserMutation.isPending}
+				onClick={() => {
+					const isCurrentUser = props.user.id === userDetails.id;
+					const confirmationMessage = isCurrentUser
+						? "Are you sure you want to reset your own account? This action will permanently delete all your data including progress, collections, and preferences. You will be logged out and redirected to set a new password."
+						: "Are you sure you want to reset this user? This action will permanently delete all user data including progress, collections, and preferences. This cannot be undone.";
+
+					openConfirmationModal(confirmationMessage, () =>
+						resetUserMutation.mutate(props.user.id),
+					);
+				}}
+			>
+				<IconRotateClockwise size={18} />
+			</ActionIcon>
+			<ActionIcon
+				color="red"
+				variant="subtle"
+				loading={deleteUserMutation.isPending}
+				onClick={() => {
+					openConfirmationModal(
+						"Are you sure you want to delete this user?",
+						() => deleteUserMutation.mutate(props.user.id),
+					);
+				}}
+			>
+				<IconTrash size={18} />
+			</ActionIcon>
+		</Group>
 	);
 };
 
-const UpdateUserModal = (props: {
-	updateUserData: User | null;
-	closeIntegrationModal: () => void;
+const showSuccessNotification = (message: string) => {
+	notifications.show({ message, color: "green", title: "Success" });
+};
+
+const showErrorNotification = (message: string) => {
+	notifications.show({ message, color: "red", title: "Error" });
+};
+
+const handleCurrentUserLogout = (
+	navigate: ReturnType<typeof useNavigate>,
+	passwordChangeUrl?: string,
+) => {
+	const changePasswordUrl = passwordChangeUrl || $path("/auth");
+	const logoutRoute = withQuery($path("/api/logout"), {
+		[redirectToQueryParam]: changePasswordUrl,
+	});
+	navigate(logoutRoute);
+};
+
+type UrlDisplayData = {
+	url: string;
+	title: string;
+	description: string;
+} | null;
+
+export const meta = () => {
+	return [{ title: "User Settings | Ryot" }];
+};
+
+const invalidateUsersList = () =>
+	queryClient.invalidateQueries({
+		queryKey: queryFactory.miscellaneous.usersList._def,
+	});
+
+const UserInvitationModal = (props: {
+	opened: boolean;
+	onClose: () => void;
+	onSuccess: (data: UrlDisplayData) => void;
+}) => {
+	const [username, setUsername] = useState("");
+
+	const handleClose = () => {
+		setUsername("");
+		props.onClose();
+	};
+
+	const handleCreateInvitation = () => {
+		if (username.trim()) {
+			createInvitationMutation.mutate(username.trim());
+		}
+	};
+
+	const createInvitationMutation = useMutation({
+		mutationFn: async (username: string) => {
+			const { registerUser } = await clientGqlService.request(
+				RegisterUserDocument,
+				{
+					input: { data: { password: { username, password: "" } } },
+				},
+			);
+
+			if (registerUser.__typename !== "StringIdObject") {
+				throw new Error("Failed to register user");
+			}
+
+			const { getPasswordChangeSession } = await clientGqlService.request(
+				GetPasswordChangeSessionDocument,
+				{ input: { userId: registerUser.id } },
+			);
+
+			return getPasswordChangeSession.passwordChangeUrl;
+		},
+		onError: () => showErrorNotification("Failed to create user invitation"),
+		onSuccess: async (createUserInvitation) => {
+			showSuccessNotification("User invitation created successfully");
+			props.onSuccess({
+				url: createUserInvitation,
+				title: "User Invitation Created",
+				description: "Share this URL with the user to set their password",
+			});
+			invalidateUsersList();
+			handleClose();
+			createInvitationMutation.reset();
+		},
+	});
+
+	return (
+		<Modal
+			centered
+			opened={props.opened}
+			onClose={handleClose}
+			title="Create User Invitation"
+		>
+			<Stack>
+				<TextInput
+					required
+					autoFocus
+					value={username}
+					label="Username"
+					onChange={(e) => setUsername(e.currentTarget.value)}
+				/>
+				{!createInvitationMutation.data && (
+					<Button
+						disabled={!username.trim()}
+						onClick={handleCreateInvitation}
+						loading={createInvitationMutation.isPending}
+					>
+						Create Invitation
+					</Button>
+				)}
+			</Stack>
+		</Modal>
+	);
+};
+
+const UrlDisplayModal = (props: {
+	opened: boolean;
+	onClose: () => void;
+	data: UrlDisplayData;
 }) => {
 	return (
 		<Modal
-			opened={props.updateUserData !== null}
-			onClose={props.closeIntegrationModal}
 			centered
-			withCloseButton={false}
+			opened={props.opened}
+			onClose={props.onClose}
+			title={props.data?.title}
 		>
-			<Form
-				replace
-				method="POST"
-				onSubmit={() => props.closeIntegrationModal()}
-				action={withQuery(".", { intent: "update" })}
-			>
-				<input hidden name="userId" defaultValue={props.updateUserData?.id} />
-				<Stack>
-					<Title order={3}>Update {props.updateUserData?.name}</Title>
-					<TextInput
-						required
-						name="adminAccessToken"
-						label="Admin Access Token"
-						description="This is required as registration is disabled"
-					/>
-					<Switch
-						label="Is disabled"
-						name="isDisabled"
-						description="This will disable the user from logging in"
-						defaultChecked={props.updateUserData?.isDisabled || undefined}
-					/>
-					<PasswordInput name="password" label="Password" />
-					<Button type="submit">Submit</Button>
-				</Stack>
-			</Form>
+			<Stack>
+				<CopyableTextInput
+					value={props.data?.url}
+					description={props.data?.description}
+				/>
+				<Button onClick={props.onClose}>Close</Button>
+			</Stack>
 		</Modal>
 	);
 };

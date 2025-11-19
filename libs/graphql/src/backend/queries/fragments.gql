@@ -1,3 +1,18 @@
+fragment SearchDetailsPart on SearchDetails {
+	nextPage
+	totalItems
+}
+
+fragment IdAndNamedObjectPart on IdAndNamedObject {
+	id
+	name
+}
+
+fragment StringIdAndNamedObjectPart on StringIdAndNamedObject {
+	id
+	name
+}
+
 fragment SeenPodcastExtraInformationPart on SeenPodcastExtraInformation {
 	episode
 }
@@ -44,7 +59,7 @@ fragment SeenPart on Seen {
 	lastUpdatedOn
 	manualTimeSpent
 	numTimesUpdated
-	providerWatchedOn
+	providersConsumedOn
 	showExtraInformation {
 		...SeenShowExtraInformationPart
 	}
@@ -133,10 +148,16 @@ fragment WorkoutSummaryPart on WorkoutSummary {
 	}
 }
 
-fragment CollectionPart on Collection {
+fragment CollectionToEntityDetailsPart on GraphqlCollectionToEntityDetails {
 	id
-	name
-	userId
+	details {
+		createdOn
+		information
+		collectionId
+		lastUpdatedOn
+		creatorUserId
+		collectionName
+	}
 }
 
 fragment ReviewItemPart on ReviewItem {
@@ -149,8 +170,7 @@ fragment ReviewItemPart on ReviewItem {
 	textRendered
 	seenItemsAssociatedWith
 	postedBy {
-		id
-		name
+		...StringIdAndNamedObjectPart
 	}
 	comments {
 		id
@@ -158,8 +178,7 @@ fragment ReviewItemPart on ReviewItem {
 		likedBy
 		createdOn
 		user {
-			id
-			name
+			...StringIdAndNamedObjectPart
 		}
 	}
 	showExtraInformation {
@@ -220,7 +239,6 @@ fragment SetRestTimersPart on SetRestTimersSettings {
 
 fragment PersonDetailsGroupedByRolePart on PersonDetailsGroupedByRole {
 	name
-	count
 	items {
 		entityId
 		character

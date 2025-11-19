@@ -1,8 +1,9 @@
+use std::collections::HashSet;
+
 use async_graphql::{Enum, InputObject, SimpleObject};
 use chrono::NaiveDate;
 use enum_meta::{Meta, meta};
-use enum_models::{EntityLot, MediaLot, MediaSource};
-use rust_decimal::Decimal;
+use enum_models::{EntityLot, FilterPresetContextType, MediaLot, MediaSource};
 use schematic::{ConfigEnum, Schematic};
 use sea_orm::{FromJsonQueryResult, prelude::DateTimeUtc, sea_query::PgDateTruncUnit};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,24 @@ pub struct StringIdObject {
 )]
 #[serde(rename_all = "snake_case")]
 pub struct IdAndNamedObject {
+    pub id: i32,
+    pub name: String,
+}
+
+#[derive(
+    Eq,
+    Debug,
+    Clone,
+    Default,
+    Schematic,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    SimpleObject,
+    FromJsonQueryResult,
+)]
+#[serde(rename_all = "snake_case")]
+pub struct StringIdAndNamedObject {
     pub id: String,
     pub name: String,
 }
@@ -108,6 +127,26 @@ pub struct EntityAssets {
     pub remote_videos: Vec<EntityRemoteVideo>,
 }
 
+impl EntityAssets {
+    pub fn removed_s3_objects(&self, updated: &EntityAssets) -> (Vec<String>, Vec<String>) {
+        let new_image_keys: HashSet<&String> = updated.s3_images.iter().collect();
+        let images_to_delete = self
+            .s3_images
+            .iter()
+            .filter(|image| !new_image_keys.contains(image))
+            .cloned()
+            .collect();
+        let new_video_keys: HashSet<&String> = updated.s3_videos.iter().collect();
+        let videos_to_delete = self
+            .s3_videos
+            .iter()
+            .filter(|video| !new_video_keys.contains(video))
+            .cloned()
+            .collect();
+        (images_to_delete, videos_to_delete)
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, Enum, ConfigEnum)]
 pub enum CollectionExtraInformationLot {
     Date,
@@ -119,6 +158,7 @@ pub enum CollectionExtraInformationLot {
     StringArray,
 }
 
+#[skip_serializing_none]
 #[derive(
     Eq,
     Clone,
@@ -132,6 +172,7 @@ pub enum CollectionExtraInformationLot {
     InputObject,
     FromJsonQueryResult,
 )]
+#[serde(rename_all = "snake_case")]
 #[graphql(input_name = "CollectionExtraInformationInput")]
 pub struct CollectionExtraInformation {
     pub name: String,
@@ -144,14 +185,14 @@ pub struct CollectionExtraInformation {
 
 #[derive(Display, EnumIter)]
 pub enum DefaultCollection {
+    Owned,
+    Custom,
     Watchlist,
-    #[strum(serialize = "In Progress")]
-    InProgress,
+    Reminders,
     Completed,
     Monitoring,
-    Custom,
-    Owned,
-    Reminders,
+    #[strum(serialize = "In Progress")]
+    InProgress,
 }
 
 meta! {
@@ -206,7 +247,7 @@ pub enum BackgroundJob {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum BackendError {
     NoUserId,
-    NoAuthToken,
+    NoSessionId,
     SessionExpired,
     AdminOnlyAction,
     MutationNotAllowed,
@@ -218,6 +259,7 @@ pub struct NamedObject {
     pub name: String,
 }
 
+#[skip_serializing_none]
 #[derive(
     Eq,
     Clone,
@@ -232,23 +274,44 @@ pub struct NamedObject {
 )]
 pub struct SearchInput {
     pub take: Option<u64>,
-    pub page: Option<i32>,
+    pub page: Option<u64>,
     pub query: Option<String>,
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize, Debug, SimpleObject, Clone, Default)]
 pub struct SearchDetails {
-    pub total: i32,
-    pub next_page: Option<i32>,
+    pub total_items: u64,
+    pub next_page: Option<u64>,
 }
 
-#[derive(Debug, InputObject, Default)]
-pub struct ChangeCollectionToEntityInput {
+#[derive(Debug, InputObject, Clone, Serialize, Deserialize)]
+pub struct EntityToCollectionInput {
     pub entity_id: String,
     pub entity_lot: EntityLot,
+    pub information: Option<serde_json::Value>,
+}
+
+#[derive(Debug, InputObject, Default, Clone, Serialize, Deserialize)]
+pub struct ChangeCollectionToEntitiesInput {
     pub creator_user_id: String,
     pub collection_name: String,
-    pub information: Option<serde_json::Value>,
+    pub entities: Vec<EntityToCollectionInput>,
+}
+
+#[derive(Debug, InputObject, Clone, Serialize, Deserialize)]
+pub struct ReorderCollectionEntityInput {
+    pub entity_id: String,
+    pub new_position: usize,
+    pub collection_name: String,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, InputObject, Clone, Serialize, Deserialize)]
+pub struct CreateFilterPresetInput {
+    pub name: String,
+    pub filters: serde_json::Value,
+    pub context_type: FilterPresetContextType,
+    pub context_information: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, SimpleObject, Clone)]
@@ -346,8 +409,10 @@ pub struct MetadataGroupSearchInput {
 #[graphql(input_name = "PersonSourceSpecificsInput")]
 #[serde(rename_all = "snake_case")]
 pub struct PersonSourceSpecifics {
+    pub is_tvdb_company: Option<bool>,
     pub is_tmdb_company: Option<bool>,
     pub is_anilist_studio: Option<bool>,
+    pub is_giant_bomb_company: Option<bool>,
     pub is_hardcover_publisher: Option<bool>,
 }
 
@@ -362,16 +427,6 @@ pub struct PeopleSearchInput {
 }
 
 #[skip_serializing_none]
-#[derive(
-    Clone, Hash, Debug, PartialEq, InputObject, FromJsonQueryResult, Eq, Serialize, Deserialize,
-)]
-pub struct MetadataSearchInput {
-    pub lot: MediaLot,
-    pub search: SearchInput,
-    pub source: MediaSource,
-}
-
-#[skip_serializing_none]
 #[derive(Clone, Hash, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserLevelCacheKey<T> {
     pub input: T,
@@ -380,22 +435,16 @@ pub struct UserLevelCacheKey<T> {
 
 #[skip_serializing_none]
 #[derive(Clone, Hash, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataRecentlyConsumedCacheInput {
+pub struct EntityRecentlyConsumedCacheInput {
     pub entity_id: String,
     pub entity_lot: EntityLot,
 }
 
 #[skip_serializing_none]
 #[derive(Clone, Hash, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProgressUpdateCacheInput {
-    pub metadata_id: String,
-    pub show_season_number: Option<i32>,
-    pub manga_volume_number: Option<i32>,
-    pub show_episode_number: Option<i32>,
-    pub anime_episode_number: Option<i32>,
-    pub provider_watched_on: Option<String>,
-    pub podcast_episode_number: Option<i32>,
-    pub manga_chapter_number: Option<Decimal>,
+pub struct MetadataLookupCacheInput {
+    pub title: String,
+    pub language: Option<String>,
 }
 
 #[skip_serializing_none]
@@ -411,13 +460,28 @@ pub struct YoutubeMusicSongListened {
     Clone,
     Default,
     Serialize,
+    Schematic,
     PartialEq,
     InputObject,
     Deserialize,
     SimpleObject,
     FromJsonQueryResult,
 )]
+#[serde(rename_all = "snake_case")]
 #[graphql(input_name = "UserToCollectionExtraInformationInput")]
 pub struct UserToCollectionExtraInformation {
     pub is_hidden: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, SimpleObject, Clone)]
+pub struct PresignedPutUrlResponse {
+    pub key: String,
+    pub upload_url: String,
+}
+
+#[skip_serializing_none]
+#[derive(Clone, Hash, Debug, PartialEq, Eq, Serialize, Deserialize, InputObject)]
+pub struct FilterPresetQueryInput {
+    pub context_type: FilterPresetContextType,
+    pub context_information: Option<serde_json::Value>,
 }

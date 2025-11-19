@@ -1,5 +1,5 @@
 import { getFormProps, getInputProps, useForm } from "@conform-to/react";
-import { parseWithZod } from "@conform-to/zod";
+import { parseWithZod } from "@conform-to/zod/v4";
 import { useAutoAnimate } from "@formkit/auto-animate/react";
 import {
 	Alert,
@@ -26,26 +26,19 @@ import {
 	zodNumAsString,
 } from "@ryot/ts-utils";
 import { IconAt } from "@tabler/icons-react";
-import {
-	Form,
-	Link,
-	data,
-	redirect,
-	useLoaderData,
-	useSearchParams,
-} from "react-router";
-import { safeRedirect } from "remix-utils/safe-redirect";
+import { Form, Link, data, redirect, useLoaderData } from "react-router";
 import { $path } from "safe-routes";
 import { match } from "ts-pattern";
 import { withQuery } from "ufo";
 import { z } from "zod";
-import { redirectToQueryParam } from "~/lib/common";
+import { passwordConfirmationSchema } from "~/lib/shared/validation";
 import {
 	createToastHeaders,
 	getCookiesForApplication,
 	getCoreDetails,
 	redirectWithToast,
 	serverGqlService,
+	twoFactorSessionStorage,
 } from "~/lib/utilities.server";
 import type { Route } from "./+types/auth";
 
@@ -66,9 +59,9 @@ export const loader = async ({ request }: Route.LoaderArgs) => {
 	const query = parseSearchQuery(request, searchParamsSchema);
 	const [coreDetails] = await Promise.all([getCoreDetails()]);
 	if (
-		(coreDetails.oidcEnabled || true) &&
+		coreDetails.oidcEnabled &&
 		coreDetails.localAuthDisabled &&
-		query.autoOidcLaunch === true
+		query.autoOidcLaunch !== false
 	) {
 		const url = await getOidcRedirectUrl();
 		return redirect(url);
@@ -143,15 +136,18 @@ export const action = async ({ request }: Route.ActionArgs) => {
 					},
 				},
 			});
-			if (loginUser.__typename === "LoginResponse") {
+			if (loginUser.__typename === "ApiKeyResponse") {
 				const headers = await getCookiesForApplication(loginUser.apiKey);
-				const redirectTo = submission[redirectToQueryParam];
-				return redirect(
-					redirectTo
-						? safeRedirect(submission[redirectToQueryParam])
-						: $path("/"),
-					{ headers },
-				);
+				return redirect($path("/"), { headers });
+			}
+			if (loginUser.__typename === "StringIdObject") {
+				const session = await twoFactorSessionStorage.getSession();
+				session.set("userId", loginUser.id);
+				const twoFactorCookie =
+					await twoFactorSessionStorage.commitSession(session);
+				return redirect($path("/two-factor"), {
+					headers: new Headers({ "set-cookie": twoFactorCookie }),
+				});
 			}
 			const message = match(loginUser.error)
 				.with(
@@ -179,32 +175,20 @@ export const action = async ({ request }: Route.ActionArgs) => {
 		.run();
 };
 
-const registerSchema = z
-	.object({
-		username: z.string(),
-		password: z
-			.string()
-			.min(8, "Password should be at least 8 characters long"),
-		confirm: z.string(),
-	})
-	.refine((data) => data.password === data.confirm, {
-		message: "Passwords do not match",
-		path: ["confirm"],
-	});
+const registerSchema = passwordConfirmationSchema.safeExtend({
+	username: z.string(),
+});
 
 const loginSchema = z.object({
 	username: z.string(),
 	password: z.string(),
 	tokenValidForDays: zodNumAsString,
-	[redirectToQueryParam]: z.string().optional(),
 });
 
 export default function Page() {
 	const [form, fields] = useForm({});
 	const loaderData = useLoaderData<typeof loader>();
 	const [parent] = useAutoAnimate();
-	const [searchParams] = useSearchParams();
-	const redirectValue = searchParams.get(redirectToQueryParam);
 	const intent = loaderData.intent;
 
 	return (
@@ -230,13 +214,6 @@ export default function Page() {
 						name="tokenValidForDays"
 						defaultValue={loaderData.tokenValidForDays}
 					/>
-					{redirectValue ? (
-						<input
-							type="hidden"
-							name={redirectToQueryParam}
-							defaultValue={redirectValue}
-						/>
-					) : null}
 					<TextInput
 						{...getInputProps(fields.username, { type: "text" })}
 						label="Username"

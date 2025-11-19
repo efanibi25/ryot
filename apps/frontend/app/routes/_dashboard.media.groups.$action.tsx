@@ -1,211 +1,208 @@
 import {
 	ActionIcon,
-	Box,
-	Center,
 	Container,
 	Divider,
 	Flex,
 	Group,
-	Pagination,
 	Select,
 	Stack,
 	Tabs,
 	Text,
 	Title,
 } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
 import {
 	EntityLot,
+	FilterPresetContextType,
 	GraphqlSortOrder,
+	type MediaCollectionFilter,
 	MediaSource,
 	MetadataGroupSearchDocument,
+	type MetadataGroupSearchInput,
 	PersonAndMetadataGroupsSortBy,
 	UserMetadataGroupsListDocument,
 	type UserMetadataGroupsListInput,
 } from "@ryot/generated/graphql/backend/graphql";
-import {
-	changeCase,
-	cloneDeep,
-	isEqual,
-	parseParameters,
-	parseSearchQuery,
-	startCase,
-	zodIntAsString,
-} from "@ryot/ts-utils";
+import { cloneDeep, startCase } from "@ryot/ts-utils";
 import {
 	IconCheck,
 	IconFilter,
 	IconListCheck,
 	IconSearch,
-	IconSortAscending,
-	IconSortDescending,
 } from "@tabler/icons-react";
-import { useLoaderData, useNavigate } from "react-router";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useNavigate } from "react-router";
 import { $path } from "safe-routes";
-import invariant from "tiny-invariant";
-import { match } from "ts-pattern";
-import { z } from "zod";
 import {
-	ApplicationGrid,
-	BulkEditingAffix,
+	ApplicationPagination,
+	CreateButton,
+	DisplayListDetailsAndRefresh,
+	SkeletonLoader,
+} from "~/components/common";
+import { BulkCollectionEditingAffix } from "~/components/common/BulkCollectionEditingAffix";
+import {
+	FilterPresetBar,
+	FilterPresetModalManager,
+} from "~/components/common/filter-presets";
+import {
 	CollectionsFilter,
 	DebouncedSearchInput,
-	DisplayListDetailsAndRefresh,
 	FiltersModal,
-} from "~/components/common";
-import { MetadataGroupDisplayItem } from "~/components/media";
-import {
-	clientGqlService,
-	pageQueryParam,
-	zodCollectionFilter,
-} from "~/lib/common";
-import { useAppSearchParam, useCoreDetails } from "~/lib/hooks";
+	SortOrderToggle,
+} from "~/components/common/filters";
+import { ApplicationGrid } from "~/components/common/layout";
+import { MetadataGroupDisplayItem } from "~/components/media/display-items";
+import { useFilterModals } from "~/lib/hooks/filters/use-modals";
+import { useFilterPresets } from "~/lib/hooks/filters/use-presets";
+import { useFilterState } from "~/lib/hooks/filters/use-state";
+import { useCoreDetails, useUserMetadataGroupList } from "~/lib/shared/hooks";
+import { clientGqlService, queryFactory } from "~/lib/shared/react-query";
+import { convertEnumToSelectData } from "~/lib/shared/ui-utils";
 import { useBulkEditCollection } from "~/lib/state/collection";
-import {
-	getCoreDetails,
-	getSearchEnhancedCookieName,
-	redirectToFirstPageIfOnInvalidPage,
-	serverGqlService,
-} from "~/lib/utilities.server";
-import type { Route } from "./+types/_dashboard.media.groups.$action";
+import type { FilterUpdateFunction } from "~/lib/types";
 
-export type SearchParams = {
-	query?: string;
-};
+interface ListFilterState {
+	page: number;
+	query: string;
+	orderBy: GraphqlSortOrder;
+	collections: MediaCollectionFilter[];
+	sortBy: PersonAndMetadataGroupsSortBy;
+}
 
-const defaultFilters = {
+interface SearchFilterState {
+	page: number;
+	query: string;
+	source: MediaSource;
+}
+
+const defaultListFilters: ListFilterState = {
+	page: 1,
+	query: "",
 	collections: [],
 	orderBy: GraphqlSortOrder.Desc,
 	sortBy: PersonAndMetadataGroupsSortBy.AssociatedEntityCount,
 };
 
-enum Action {
-	List = "list",
-	Search = "search",
-}
-
-export const loader = async ({ request, params }: Route.LoaderArgs) => {
-	const { action } = parseParameters(
-		params,
-		z.object({ action: z.nativeEnum(Action) }),
-	);
-	const cookieName = await getSearchEnhancedCookieName(
-		`groups.${action}`,
-		request,
-	);
-	const schema = z.object({
-		query: z.string().optional(),
-		[pageQueryParam]: zodIntAsString.default("1"),
-	});
-	const query = parseSearchQuery(request, schema);
-	const [totalResults, list, search, respectCoreDetailsPageSize, listInput] =
-		await match(action)
-			.with(Action.List, async () => {
-				const listSchema = z.object({
-					collections: zodCollectionFilter,
-					orderBy: z
-						.nativeEnum(GraphqlSortOrder)
-						.default(defaultFilters.orderBy),
-					sortBy: z
-						.nativeEnum(PersonAndMetadataGroupsSortBy)
-						.default(defaultFilters.sortBy),
-				});
-				const urlParse = parseSearchQuery(request, listSchema);
-				const input: UserMetadataGroupsListInput = {
-					filter: { collections: urlParse.collections },
-					sort: { by: urlParse.sortBy, order: urlParse.orderBy },
-					search: { page: query[pageQueryParam], query: query.query },
-				};
-				const { userMetadataGroupsList } =
-					await serverGqlService.authenticatedRequest(
-						request,
-						UserMetadataGroupsListDocument,
-						{ input },
-					);
-				return [
-					userMetadataGroupsList.response.details.total,
-					{ list: userMetadataGroupsList, url: urlParse },
-					undefined,
-					false,
-					input,
-				] as const;
-			})
-			.with(Action.Search, async () => {
-				const searchSchema = z.object({
-					source: z.nativeEnum(MediaSource).default(MediaSource.Tmdb),
-				});
-				const urlParse = parseSearchQuery(request, searchSchema);
-				const coreDetails = await getCoreDetails();
-				const lot = coreDetails.metadataGroupSourceLotMappings.find(
-					(m) => m.source === urlParse.source,
-				)?.lot;
-				invariant(lot);
-				const { metadataGroupSearch } =
-					await serverGqlService.authenticatedRequest(
-						request,
-						MetadataGroupSearchDocument,
-						{
-							input: {
-								lot,
-								source: urlParse.source,
-								search: { page: query[pageQueryParam], query: query.query },
-							},
-						},
-					);
-				return [
-					metadataGroupSearch.details.total,
-					undefined,
-					{ search: metadataGroupSearch, url: urlParse, lot },
-					true,
-					undefined,
-				] as const;
-			})
-			.exhaustive();
-	const totalPages = await redirectToFirstPageIfOnInvalidPage({
-		request,
-		totalResults,
-		respectCoreDetailsPageSize,
-		currentPage: query[pageQueryParam],
-	});
-	return {
-		list,
-		query,
-		action,
-		search,
-		listInput,
-		totalPages,
-		cookieName,
-		[pageQueryParam]: query[pageQueryParam],
-	};
+const defaultSearchFilters: SearchFilterState = {
+	page: 1,
+	query: "",
+	source: MediaSource.Tmdb,
 };
 
-export const meta = ({ params }: Route.MetaArgs) => {
-	return [{ title: `${changeCase(params.action || "")} Groups | Ryot` }];
+export const meta = () => {
+	return [{ title: "Media Groups | Ryot" }];
 };
 
-export default function Page() {
-	const loaderData = useLoaderData<typeof loader>();
-	const coreDetails = useCoreDetails();
-	const [_, { setP }] = useAppSearchParam(loaderData.cookieName);
+export default function Page(props: { params: { action: string } }) {
 	const navigate = useNavigate();
-	const [
-		filtersModalOpened,
-		{ open: openFiltersModal, close: closeFiltersModal },
-	] = useDisclosure(false);
-	const bulkEditingCollection = useBulkEditCollection();
+	const action = props.params.action;
+	const coreDetails = useCoreDetails();
 
-	const bulkEditingState = bulkEditingCollection.state;
-	const areFiltersApplied =
-		loaderData.list?.url.orderBy !== defaultFilters.orderBy ||
-		loaderData.list?.url.sortBy !== defaultFilters.sortBy ||
-		!isEqual(loaderData.list?.url.collections, defaultFilters.collections);
+	const listModals = useFilterModals();
+	const searchModals = useFilterModals();
+
+	const listState = useFilterState({
+		storageKey: "GroupsListFilters",
+		defaultFilters: defaultListFilters,
+	});
+
+	const searchState = useFilterState({
+		storageKey: "GroupsSearchFilters",
+		defaultFilters: defaultSearchFilters,
+	});
+
+	const metadataGroupSourceOptions = useMemo(
+		() =>
+			coreDetails.metadataGroupSourceLotMappings.map((o) => ({
+				value: o.source.toString(),
+				label: startCase(o.source.toLowerCase()),
+			})),
+		[coreDetails.metadataGroupSourceLotMappings],
+	);
+
+	const listPresets = useFilterPresets({
+		enabled: action === "list",
+		filters: listState.normalizedFilters,
+		setFilters: listState.setFiltersState,
+		storageKeyPrefix: "GroupsListActivePreset",
+		contextType: FilterPresetContextType.MetadataGroupsList,
+	});
+
+	const searchPresets = useFilterPresets({
+		enabled: action === "search",
+		filters: searchState.normalizedFilters,
+		setFilters: searchState.setFiltersState,
+		storageKeyPrefix: "GroupsSearchActivePreset",
+		contextType: FilterPresetContextType.MetadataGroupsSearch,
+	});
+
+	const listInput: UserMetadataGroupsListInput = useMemo(
+		() => ({
+			filter: { collections: listState.normalizedFilters.collections },
+			search: {
+				page: listState.normalizedFilters.page,
+				query: listState.normalizedFilters.query,
+			},
+			sort: {
+				by: listState.normalizedFilters.sortBy,
+				order: listState.normalizedFilters.orderBy,
+			},
+		}),
+		[listState.normalizedFilters],
+	);
+
+	const {
+		data: userMetadataGroupsList,
+		refetch: refetchUserMetadataGroupsList,
+	} = useUserMetadataGroupList(listInput, action === "list");
+
+	const searchInput: MetadataGroupSearchInput = useMemo(() => {
+		const lot = coreDetails.metadataGroupSourceLotMappings.find(
+			(m) => m.source === searchState.normalizedFilters.source,
+		)?.lot;
+		if (!lot) throw new Error("Invalid source selected");
+		return {
+			lot,
+			source: searchState.normalizedFilters.source,
+			search: {
+				page: searchState.normalizedFilters.page,
+				query: searchState.normalizedFilters.query,
+			},
+		};
+	}, [searchState.normalizedFilters, coreDetails]);
+
+	const { data: metadataGroupSearch } = useQuery({
+		enabled: action === "search" && !!searchInput.lot,
+		queryKey: queryFactory.media.metadataGroupSearch(searchInput).queryKey,
+		queryFn: () =>
+			clientGqlService
+				.request(MetadataGroupSearchDocument, { input: searchInput })
+				.then((data) => data.metadataGroupSearch),
+	});
+
+	const searchInputValue =
+		action === "list"
+			? listState.normalizedFilters.query
+			: searchState.normalizedFilters.query;
 
 	return (
 		<>
-			<BulkEditingAffix
+			<FilterPresetModalManager
+				presetManager={listPresets}
+				opened={listModals.presetModal.opened}
+				onClose={listModals.presetModal.close}
+				placeholder="e.g., Favorite Franchises"
+			/>
+			<FilterPresetModalManager
+				presetManager={searchPresets}
+				placeholder="e.g., TMDB Collections"
+				opened={searchModals.presetModal.opened}
+				onClose={searchModals.presetModal.close}
+			/>
+			<BulkCollectionEditingAffix
 				bulkAddEntities={async () => {
-					if (!loaderData.listInput) return [];
-					const input = cloneDeep(loaderData.listInput);
+					if (action !== "list") return [];
+					const input = cloneDeep(listInput);
 					input.search = { ...input.search, take: Number.MAX_SAFE_INTEGER };
 					return await clientGqlService
 						.request(UserMetadataGroupsListDocument, { input })
@@ -222,20 +219,9 @@ export default function Page() {
 					<Title>Groups</Title>
 					<Tabs
 						variant="default"
-						value={loaderData.action}
+						value={action}
 						onChange={(v) => {
-							if (v)
-								navigate(
-									$path(
-										"/media/groups/:action",
-										{ action: v },
-										{
-											...(loaderData.query.query && {
-												query: loaderData.query.query,
-											}),
-										},
-									),
-								);
+							if (v) navigate($path("/media/groups/:action", { action: v }));
 						}}
 					>
 						<Tabs.List style={{ alignItems: "center" }}>
@@ -245,125 +231,137 @@ export default function Page() {
 							<Tabs.Tab value="search" leftSection={<IconSearch size={24} />}>
 								<Text>Search</Text>
 							</Tabs.Tab>
+							<CreateButton
+								to={$path("/media/groups/update/:action", { action: "create" })}
+							/>
 						</Tabs.List>
 					</Tabs>
 					<Group wrap="nowrap">
 						<DebouncedSearchInput
+							value={searchInputValue}
 							placeholder="Search for groups"
-							initialValue={loaderData.query.query}
-							enhancedQueryParams={loaderData.cookieName}
+							onChange={(value) => {
+								if (action === "list") {
+									listState.updateQuery(value);
+								} else {
+									searchState.updateQuery(value);
+								}
+							}}
 						/>
-						{loaderData.action === Action.List ? (
+						{action === "list" ? (
 							<>
 								<ActionIcon
-									onClick={openFiltersModal}
-									color={areFiltersApplied ? "blue" : "gray"}
+									onClick={listModals.filtersModal.open}
+									color={listState.areFiltersActive ? "blue" : "gray"}
 								>
 									<IconFilter size={24} />
 								</ActionIcon>
 								<FiltersModal
-									closeFiltersModal={closeFiltersModal}
-									cookieName={loaderData.cookieName}
-									opened={filtersModalOpened}
+									resetFilters={listState.resetFilters}
+									opened={listModals.filtersModal.opened}
+									onSavePreset={listModals.presetModal.open}
+									closeFiltersModal={listModals.filtersModal.close}
 								>
-									<FiltersModalForm />
+									<FiltersModalForm
+										filters={listState.normalizedFilters}
+										onFiltersChange={listState.updateFilter}
+									/>
 								</FiltersModal>
 							</>
 						) : null}
-						{loaderData.action === Action.Search ? (
+						{action === "search" ? (
 							<>
 								<Select
-									onChange={(v) => setP("source", v)}
-									defaultValue={loaderData.search?.url.source}
-									data={coreDetails.metadataGroupSourceLotMappings.map((o) => ({
-										value: o.source.toString(),
-										label: startCase(o.source.toLowerCase()),
-									}))}
+									data={metadataGroupSourceOptions}
+									value={searchState.normalizedFilters.source}
+									onChange={(v) =>
+										v && searchState.updateFilter("source", v as MediaSource)
+									}
+								/>
+								<ActionIcon
+									onClick={searchModals.filtersModal.open}
+									color={searchState.areFiltersActive ? "blue" : "gray"}
+								>
+									<IconFilter size={24} />
+								</ActionIcon>
+								<FiltersModal
+									resetFilters={searchState.resetFilters}
+									opened={searchModals.filtersModal.opened}
+									onSavePreset={searchModals.presetModal.open}
+									closeFiltersModal={searchModals.filtersModal.close}
 								/>
 							</>
 						) : null}
 					</Group>
-					{loaderData.list ? (
-						<>
-							<DisplayListDetailsAndRefresh
-								cacheId={loaderData.list.list.cacheId}
-								total={loaderData.list.list.response.details.total}
-							/>
-							{loaderData.list.list.response.details.total > 0 ? (
-								<ApplicationGrid>
-									{loaderData.list.list.response.items.map((gr) => {
-										const becItem = {
-											entityId: gr,
-											entityLot: EntityLot.MetadataGroup,
-										};
-										const isAdded = bulkEditingCollection.isAdded(becItem);
-										return (
-											<MetadataGroupDisplayItem
-												key={gr}
-												metadataGroupId={gr}
-												topRight={
-													bulkEditingState &&
-													bulkEditingState.data.action === "add" ? (
-														<ActionIcon
-															variant={isAdded ? "filled" : "transparent"}
-															color="green"
-															onClick={() => {
-																if (isAdded) bulkEditingState.remove(becItem);
-																else bulkEditingState.add(becItem);
-															}}
-														>
-															<IconCheck size={18} />
-														</ActionIcon>
-													) : undefined
-												}
-											/>
-										);
-									})}
-								</ApplicationGrid>
-							) : (
-								<Text>No information to display</Text>
-							)}
-							<Center>
-								<Pagination
-									size="sm"
-									total={loaderData.totalPages}
-									value={loaderData[pageQueryParam]}
-									onChange={(v) => setP(pageQueryParam, v.toString())}
-								/>
-							</Center>
-						</>
+					{action === "list" ? (
+						<FilterPresetBar presetManager={listPresets} />
+					) : null}
+					{action === "search" ? (
+						<FilterPresetBar presetManager={searchPresets} />
 					) : null}
 
-					{loaderData.search ? (
-						<>
-							<Box>
-								<Text display="inline" fw="bold">
-									{loaderData.search.search.details.total}
-								</Text>{" "}
-								items found
-							</Box>
-							{loaderData.search.search.details.total > 0 ? (
-								<ApplicationGrid>
-									{loaderData.search.search.items.map((group) => (
-										<MetadataGroupDisplayItem
-											key={group}
-											metadataGroupId={group}
-											shouldHighlightNameIfInteracted
-										/>
-									))}
-								</ApplicationGrid>
-							) : (
-								<Text>No groups found matching your query</Text>
-							)}
-							<Center>
-								<Pagination
-									size="sm"
-									total={loaderData.totalPages}
-									value={loaderData[pageQueryParam]}
-									onChange={(v) => setP(pageQueryParam, v.toString())}
+					{action === "list" ? (
+						userMetadataGroupsList ? (
+							<>
+								<DisplayListDetailsAndRefresh
+									cacheId={userMetadataGroupsList.cacheId}
+									onRefreshButtonClicked={refetchUserMetadataGroupsList}
+									total={userMetadataGroupsList.response.details.totalItems}
+									isRandomSortOrderSelected={
+										listState.normalizedFilters.sortBy ===
+										PersonAndMetadataGroupsSortBy.Random
+									}
 								/>
-							</Center>
-						</>
+								{userMetadataGroupsList.response.details.totalItems > 0 ? (
+									<ApplicationGrid>
+										{userMetadataGroupsList.response.items.map((gr) => (
+											<MetadataGroupListItem key={gr} item={gr} />
+										))}
+									</ApplicationGrid>
+								) : (
+									<Text>No information to display</Text>
+								)}
+								<ApplicationPagination
+									value={listState.normalizedFilters.page}
+									onChange={(v) => listState.updateFilter("page", v)}
+									totalItems={
+										userMetadataGroupsList.response.details.totalItems
+									}
+								/>
+							</>
+						) : (
+							<SkeletonLoader />
+						)
+					) : null}
+
+					{action === "search" ? (
+						metadataGroupSearch ? (
+							<>
+								<DisplayListDetailsAndRefresh
+									total={metadataGroupSearch.response.details.totalItems}
+								/>
+								{metadataGroupSearch.response.details.totalItems > 0 ? (
+									<ApplicationGrid>
+										{metadataGroupSearch.response.items.map((group) => (
+											<MetadataGroupDisplayItem
+												key={group}
+												metadataGroupId={group}
+												shouldHighlightNameIfInteracted
+											/>
+										))}
+									</ApplicationGrid>
+								) : (
+									<Text>No groups found matching your query</Text>
+								)}
+								<ApplicationPagination
+									value={searchState.normalizedFilters.page}
+									onChange={(v) => searchState.updateFilter("page", v)}
+									totalItems={metadataGroupSearch.response.details.totalItems}
+								/>
+							</>
+						) : (
+							<SkeletonLoader />
+						)
 					) : null}
 				</Stack>
 			</Container>
@@ -371,43 +369,73 @@ export default function Page() {
 	);
 }
 
-const FiltersModalForm = () => {
-	const loaderData = useLoaderData<typeof loader>();
-	const [_, { setP }] = useAppSearchParam(loaderData.cookieName);
+interface FiltersModalFormProps {
+	filters: ListFilterState;
+	onFiltersChange: FilterUpdateFunction<ListFilterState>;
+}
 
-	if (!loaderData.list) return null;
+const FiltersModalForm = (props: FiltersModalFormProps) => {
+	const { filters, onFiltersChange } = props;
 
 	return (
 		<>
 			<Flex gap="xs" align="center">
 				<Select
 					w="100%"
-					data={Object.values(PersonAndMetadataGroupsSortBy).map((o) => ({
-						value: o.toString(),
-						label: startCase(o.toLowerCase()),
-					}))}
-					defaultValue={loaderData.list.url.sortBy}
-					onChange={(v) => setP("sortBy", v)}
+					value={filters.sortBy}
+					data={convertEnumToSelectData(PersonAndMetadataGroupsSortBy)}
+					onChange={(v) =>
+						v && onFiltersChange("sortBy", v as PersonAndMetadataGroupsSortBy)
+					}
 				/>
-				<ActionIcon
-					onClick={() => {
-						if (loaderData.list?.url.orderBy === GraphqlSortOrder.Asc)
-							setP("orderBy", GraphqlSortOrder.Desc);
-						else setP("orderBy", GraphqlSortOrder.Asc);
-					}}
-				>
-					{loaderData.list.url.orderBy === GraphqlSortOrder.Asc ? (
-						<IconSortAscending />
-					) : (
-						<IconSortDescending />
-					)}
-				</ActionIcon>
+				{filters.sortBy !== PersonAndMetadataGroupsSortBy.Random ? (
+					<SortOrderToggle
+						currentOrder={filters.orderBy}
+						onOrderChange={(order) => onFiltersChange("orderBy", order)}
+					/>
+				) : null}
 			</Flex>
 			<Divider />
 			<CollectionsFilter
-				cookieName={loaderData.cookieName}
-				applied={loaderData.list.url.collections}
+				applied={filters.collections}
+				onFiltersChanged={(val) => onFiltersChange("collections", val)}
 			/>
 		</>
+	);
+};
+
+type MetadataGroupListItemProps = {
+	item: string;
+};
+
+const MetadataGroupListItem = (props: MetadataGroupListItemProps) => {
+	const bulkEditingCollection = useBulkEditCollection();
+	const bulkEditingState = bulkEditingCollection.state;
+
+	const becItem = { entityId: props.item, entityLot: EntityLot.MetadataGroup };
+	const isAlreadyPresent = bulkEditingCollection.isAlreadyPresent(becItem);
+	const isAdded = bulkEditingCollection.isAdded(becItem);
+
+	return (
+		<MetadataGroupDisplayItem
+			noEntityLot
+			metadataGroupId={props.item}
+			centerElement={
+				bulkEditingState &&
+				bulkEditingState.data.action === "add" &&
+				!isAlreadyPresent ? (
+					<ActionIcon
+						color="green"
+						variant={isAdded ? "filled" : "transparent"}
+						onClick={() => {
+							if (isAdded) bulkEditingState.remove(becItem);
+							else bulkEditingState.add(becItem);
+						}}
+					>
+						<IconCheck size={18} />
+					</ActionIcon>
+				) : undefined
+			}
+		/>
 	);
 };

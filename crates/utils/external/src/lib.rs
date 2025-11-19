@@ -1,20 +1,11 @@
-use std::sync::Arc;
-
 use anyhow::Result;
-use common_utils::{APPLICATION_JSON_HEADER, USER_AGENT_STR, ryot_log, sleep_for_n_seconds};
-use database_models::{metadata, prelude::Metadata};
-use dependent_utils::deploy_update_metadata_job;
-use enum_models::{MediaLot, MediaSource};
+use common_utils::{APPLICATION_JSON_HEADER, get_base_http_client, ryot_log};
 use reqwest::{
-    Client, ClientBuilder,
-    header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT},
+    Client,
+    header::{ACCEPT, AUTHORIZATION, HeaderValue},
 };
-use sea_orm::{
-    prelude::DateTimeUtc,
-    {ColumnTrait, EntityTrait, QueryFilter},
-};
+use sea_orm::prelude::DateTimeUtc;
 use serde::{Deserialize, Serialize};
-use supporting_service::SupportingService;
 
 pub mod jellyfin {
     use super::*;
@@ -47,7 +38,7 @@ pub mod jellyfin {
         pub id: String,
         pub name: String,
         #[serde(rename = "Type")]
-        pub type_: Option<MediaType>,
+        pub typ: Option<MediaType>,
         pub index_number: Option<i32>,
         pub series_id: Option<String>,
         pub series_name: Option<String>,
@@ -72,17 +63,20 @@ pub mod jellyfin {
     pub async fn get_authenticated_client(
         base_url: &String,
         username: &String,
-        password: &String,
+        password: &Option<String>,
     ) -> Result<(Client, String)> {
         let mut emby_header_value =
             r#"MediaBrowser , Client="other", Device="script", DeviceId="script", Version="0.0.0""#
                 .to_string();
-        let uri = format!("{}/Users/AuthenticateByName", base_url);
+        let uri = format!("{base_url}/Users/AuthenticateByName");
         let client = Client::new();
         let authenticate_request = client
             .post(uri)
             .header(AUTHORIZATION, &emby_header_value)
-            .json(&serde_json::json!({ "Username": username, "Pw": password }));
+            .json(&serde_json::json!({
+                "Username": username,
+                "Pw": password.clone().unwrap_or_default()
+            }));
         ryot_log!(debug, "Authentication request: {:?}", authenticate_request);
         let authenticate = authenticate_request
             .send()
@@ -99,50 +93,16 @@ pub mod jellyfin {
 
         emby_header_value.push_str(&format!(r#", Token="{}""#, authenticate.access_token));
 
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_STR));
-        headers.insert(ACCEPT, APPLICATION_JSON_HEADER.clone());
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&emby_header_value).unwrap(),
-        );
-        let client: Client = ClientBuilder::new()
-            .default_headers(headers)
-            .build()
-            .unwrap();
+        let client = get_base_http_client(Some(vec![
+            (ACCEPT, APPLICATION_JSON_HEADER),
+            (
+                AUTHORIZATION,
+                HeaderValue::from_str(&emby_header_value).unwrap(),
+            ),
+        ]));
         let user_id = authenticate.user.id;
         ryot_log!(debug, "Authenticated as user id: {}", user_id);
 
         Ok((client, user_id))
-    }
-}
-
-pub mod audiobookshelf {
-    use super::*;
-
-    pub async fn get_updated_podcast_metadata(
-        identifier: &String,
-        ss: &Arc<SupportingService>,
-    ) -> Result<metadata::Model> {
-        async fn get_metadata(
-            identifier: &String,
-            ss: &Arc<SupportingService>,
-        ) -> Result<metadata::Model> {
-            let m = Metadata::find()
-                .filter(metadata::Column::Identifier.eq(identifier))
-                .filter(metadata::Column::Lot.eq(MediaLot::Podcast))
-                .filter(metadata::Column::Source.eq(MediaSource::Itunes))
-                .one(&ss.db)
-                .await?
-                .unwrap();
-            Ok(m)
-        }
-
-        let already = get_metadata(identifier, ss).await?;
-        if already.podcast_specifics.is_none() {
-            deploy_update_metadata_job(&already.id, ss).await.unwrap();
-            sleep_for_n_seconds(3).await;
-        }
-        get_metadata(identifier, ss).await
     }
 }

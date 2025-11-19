@@ -1,20 +1,22 @@
 use std::{collections::HashMap, fs, sync::Arc};
 
-use async_graphql::Result;
+use anyhow::Result;
 use chrono::NaiveDateTime;
-use dependent_models::{ImportCompletedItem, ImportResult};
+use common_utils::convert_naive_to_utc_datetime;
+use dependent_models::{
+    CollectionToEntityDetails, ImportCompletedItem, ImportOrExportMetadataItem, ImportResult,
+};
 use enum_models::{ImportSource, MediaLot, MediaSource, Visibility};
 use media_models::{
-    DeployJsonImportInput, ImportOrExportItemRating, ImportOrExportItemReview,
-    ImportOrExportMetadataItem, ImportOrExportMetadataItemSeen,
+    DeployPathImportInput, ImportOrExportItemRating, ImportOrExportItemReview,
+    ImportOrExportMetadataItemSeen,
 };
 use nest_struct::nest_struct;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use rust_decimal::{Decimal, dec};
 use serde::Deserialize;
 use supporting_service::SupportingService;
 
-use super::utils;
+use crate::utils;
 
 #[nest_struct]
 #[derive(Debug, Deserialize)]
@@ -59,10 +61,10 @@ struct AnilistExport {
 }
 
 pub async fn import(
-    input: DeployJsonImportInput,
+    input: DeployPathImportInput,
     ss: &Arc<SupportingService>,
 ) -> Result<ImportResult> {
-    let export = fs::read_to_string(input.export)?;
+    let export = fs::read_to_string(input.export_path)?;
     let data = serde_json::from_str::<AnilistExport>(&export)?;
     let user_lists = data.user.custom_lists;
     let mut completed = vec![];
@@ -88,11 +90,11 @@ pub async fn import(
         };
         for num in 1..progress.unwrap_or_default() + 1 {
             let mut history = ImportOrExportMetadataItemSeen {
-                provider_watched_on: Some(ImportSource::Anilist.to_string()),
+                providers_consumed_on: Some(vec![ImportSource::Anilist.to_string()]),
                 ended_on: item
                     .updated_at
                     .clone()
-                    .map(|d| parse_date_string(&d).date()),
+                    .map(|d| convert_naive_to_utc_datetime(parse_date_string(&d))),
                 ..Default::default()
             };
             match lot {
@@ -114,12 +116,18 @@ pub async fn import(
             match lot {
                 MediaLot::Anime => {
                     if let Some(list) = anime_custom_lists.get(in_list) {
-                        to_push_item.collections.push(list.clone());
+                        to_push_item.collections.push(CollectionToEntityDetails {
+                            collection_name: list.clone(),
+                            ..Default::default()
+                        });
                     }
                 }
                 MediaLot::Manga => {
                     if let Some(list) = manga_custom_lists.get(in_list) {
-                        to_push_item.collections.push(list.clone());
+                        to_push_item.collections.push(CollectionToEntityDetails {
+                            collection_name: list.clone(),
+                            ..Default::default()
+                        });
                     }
                 }
                 _ => unreachable!(),
@@ -131,13 +139,13 @@ pub async fn import(
         if item.score > dec!(0) {
             default_review.rating = Some(item.score);
         }
-        if let Some(notes) = item.notes {
-            if !notes.is_empty() {
-                default_review.review = Some(ImportOrExportItemReview {
-                    text: Some(notes),
-                    ..Default::default()
-                });
-            }
+        if let Some(notes) = item.notes
+            && !notes.is_empty()
+        {
+            default_review.review = Some(ImportOrExportItemReview {
+                text: Some(notes),
+                ..Default::default()
+            });
         }
         to_push_item.reviews.push(default_review);
         completed.push(ImportCompletedItem::Metadata(to_push_item));
@@ -172,7 +180,10 @@ pub async fn import(
         completed.push(ImportCompletedItem::Metadata(ImportOrExportMetadataItem {
             lot,
             source: MediaSource::Anilist,
-            collections: vec!["Favorite".to_string()],
+            collections: vec![CollectionToEntityDetails {
+                collection_name: "Favorite".to_string(),
+                ..Default::default()
+            }],
             identifier: favorite.favourite_id.to_string(),
             ..Default::default()
         }));

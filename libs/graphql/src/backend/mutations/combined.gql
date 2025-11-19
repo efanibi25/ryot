@@ -16,14 +16,23 @@ mutation LoginUser($input: AuthUserInput!) {
 		... on LoginError {
 			error
 		}
-		... on LoginResponse {
+		... on ApiKeyResponse {
 			apiKey
+		}
+		... on StringIdObject {
+			id
 		}
 	}
 }
 
-mutation AddEntityToCollection($input: ChangeCollectionToEntityInput!) {
-	addEntityToCollection(input: $input)
+mutation LogoutUser {
+	logoutUser
+}
+
+mutation DeployAddEntitiesToCollectionJob(
+	$input: ChangeCollectionToEntitiesInput!
+) {
+	deployAddEntitiesToCollectionJob(input: $input)
 }
 
 mutation CreateCustomExercise($input: ExerciseInput!) {
@@ -44,6 +53,26 @@ mutation UpdateCustomMetadata($input: UpdateCustomMetadataInput!) {
 	updateCustomMetadata(input: $input)
 }
 
+mutation CreateCustomMetadataGroup($input: CreateCustomMetadataGroupInput!) {
+	createCustomMetadataGroup(input: $input) {
+		id
+	}
+}
+
+mutation UpdateCustomMetadataGroup($input: UpdateCustomMetadataGroupInput!) {
+	updateCustomMetadataGroup(input: $input)
+}
+
+mutation CreateCustomPerson($input: CreateCustomPersonInput!) {
+	createCustomPerson(input: $input) {
+		id
+	}
+}
+
+mutation UpdateCustomPerson($input: UpdateCustomPersonInput!) {
+	updateCustomPerson(input: $input)
+}
+
 mutation CreateOrUpdateCollection($input: CreateOrUpdateCollectionInput!) {
 	createOrUpdateCollection(input: $input) {
 		id
@@ -54,8 +83,8 @@ mutation CreateReviewComment($input: CreateReviewCommentInput!) {
 	createReviewComment(input: $input)
 }
 
-mutation CreateUserMeasurement($input: UserMeasurementInput!) {
-	createUserMeasurement(input: $input)
+mutation CreateOrUpdateUserMeasurement($input: UserMeasurementInput!) {
+	createOrUpdateUserMeasurement(input: $input)
 }
 
 mutation CreateUserNotificationPlatform(
@@ -100,6 +129,16 @@ mutation DeleteUser($toDeleteUserId: String!) {
 	deleteUser(toDeleteUserId: $toDeleteUserId)
 }
 
+mutation ResetUser($toResetUserId: String!) {
+	resetUser(toResetUserId: $toResetUserId) {
+		__typename
+		... on UserResetResponse {
+			userId
+			passwordChangeUrl
+		}
+	}
+}
+
 mutation DeleteUserIntegration($integrationId: String!) {
 	deleteUserIntegration(integrationId: $integrationId)
 }
@@ -124,10 +163,6 @@ mutation DeployBackgroundJob($jobName: BackgroundJob!) {
 	deployBackgroundJob(jobName: $jobName)
 }
 
-mutation DeployBulkProgressUpdate($input: [ProgressUpdateInput!]!) {
-	deployBulkProgressUpdate(input: $input)
-}
-
 mutation DeployExportJob {
 	deployExportJob
 }
@@ -136,16 +171,11 @@ mutation DeployImportJob($input: DeployImportJobInput!) {
 	deployImportJob(input: $input)
 }
 
-mutation DeployUpdateMetadataJob($metadataId: String!) {
-	deployUpdateMetadataJob(metadataId: $metadataId)
-}
-
-mutation DeployUpdatePersonJob($personId: String!) {
-	deployUpdatePersonJob(personId: $personId)
-}
-
-mutation DeployUpdateMetadataGroupJob($metadataGroupId: String!) {
-	deployUpdateMetadataGroupJob(metadataGroupId: $metadataGroupId)
+mutation DeployUpdateMediaEntityJob(
+	$entityId: String!
+	$entityLot: EntityLot!
+) {
+	deployUpdateMediaEntityJob(entityId: $entityId, entityLot: $entityLot)
 }
 
 mutation UpdateSeenItem($input: UpdateSeenItemInput!) {
@@ -182,17 +212,21 @@ mutation CreateOrUpdateReview($input: CreateOrUpdateReviewInput!) {
 	}
 }
 
-mutation PresignedPutS3Url($input: PresignedPutUrlInput!) {
-	presignedPutS3Url(input: $input) {
+mutation PresignedPutS3Url($prefix: String!) {
+	presignedPutS3Url(prefix: $prefix) {
 		key
 		uploadUrl
 	}
 }
 
-mutation RemoveEntityFromCollection($input: ChangeCollectionToEntityInput!) {
-	removeEntityFromCollection(input: $input) {
-		id
-	}
+mutation DeployRemoveEntitiesFromCollectionJob(
+	$input: ChangeCollectionToEntitiesInput!
+) {
+	deployRemoveEntitiesFromCollectionJob(input: $input)
+}
+
+mutation ReorderCollectionEntity($input: ReorderCollectionEntityInput!) {
+	reorderCollectionEntity(input: $input)
 }
 
 mutation TestUserNotificationPlatforms {
@@ -247,4 +281,74 @@ mutation MarkEntityAsPartial($input: MarkEntityAsPartialInput!) {
 
 mutation ExpireCacheKey($cacheId: UUID!) {
 	expireCacheKey(cacheId: $cacheId)
+}
+
+mutation DeployBulkMetadataProgressUpdate(
+	$input: [MetadataProgressUpdateInput!]!
+) {
+	deployBulkMetadataProgressUpdate(input: $input)
+}
+
+mutation InitiateTwoFactorSetup {
+	initiateTwoFactorSetup {
+		secret
+		qrCodeUrl
+	}
+}
+
+mutation CompleteTwoFactorSetup($input: UserTwoFactorSetupInput!) {
+	completeTwoFactorSetup(input: $input) {
+		backupCodes
+	}
+}
+
+mutation VerifyTwoFactor($input: UserTwoFactorVerifyInput!) {
+	verifyTwoFactor(input: $input) {
+		__typename
+		... on VerifyTwoFactorError {
+			error
+		}
+		... on ApiKeyResponse {
+			apiKey
+		}
+	}
+}
+
+mutation DisableTwoFactor {
+	disableTwoFactor
+}
+
+mutation RegenerateTwoFactorBackupCodes {
+	regenerateTwoFactorBackupCodes {
+		backupCodes
+	}
+}
+
+mutation GetPasswordChangeSession($input: GetPasswordChangeSessionInput!) {
+	getPasswordChangeSession(input: $input) {
+		userId
+		passwordChangeUrl
+	}
+}
+
+mutation SetPasswordViaSession($input: SetPasswordViaSessionInput!) {
+	setPasswordViaSession(input: $input)
+}
+
+mutation CreateFilterPreset($input: CreateFilterPresetInput!) {
+	createFilterPreset(input: $input) {
+		id
+	}
+}
+
+mutation DeleteFilterPreset($filterPresetId: UUID!) {
+	deleteFilterPreset(filterPresetId: $filterPresetId)
+}
+
+mutation UpdateFilterPresetLastUsed($filterPresetId: UUID!) {
+	updateFilterPresetLastUsed(filterPresetId: $filterPresetId)
+}
+
+mutation GenerateLogDownloadUrl {
+	generateLogDownloadUrl
 }

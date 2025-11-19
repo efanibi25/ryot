@@ -1,4 +1,4 @@
-import { parseWithZod } from "@conform-to/zod";
+import { parseWithZod } from "@conform-to/zod/v4";
 import { type ClassValue, clsx } from "clsx";
 import dayjs, { type Dayjs } from "dayjs";
 import {
@@ -8,13 +8,16 @@ import {
 } from "humanize-duration-ts";
 import camelCase from "lodash/camelCase";
 import cloneDeep from "lodash/cloneDeep";
+import debounce from "lodash/debounce";
 import groupBy from "lodash/groupBy";
 import inRange from "lodash/inRange";
 import isBoolean from "lodash/isBoolean";
 import isEmpty from "lodash/isEmpty";
 import isEqual from "lodash/isEqual";
+import isFiniteNumber from "lodash/isFinite";
 import isInteger from "lodash/isInteger";
 import isNumber from "lodash/isNumber";
+import isPlainObject from "lodash/isPlainObject";
 import isString from "lodash/isString";
 import kebabCase from "lodash/kebabCase";
 import mapValues from "lodash/mapValues";
@@ -22,12 +25,13 @@ import mergeWith from "lodash/mergeWith";
 import omitBy from "lodash/omitBy";
 import pickBy from "lodash/pickBy";
 import reverse from "lodash/reverse";
-import set from "lodash/set";
 import snakeCase from "lodash/snakeCase";
 import sortBy from "lodash/sortBy";
 import startCase from "lodash/startCase";
 import sum from "lodash/sum";
+import throttle from "lodash/throttle";
 import truncate from "lodash/truncate";
+import union from "lodash/union";
 import type { Params } from "react-router";
 import { twMerge } from "tailwind-merge";
 import invariant from "tiny-invariant";
@@ -97,13 +101,11 @@ export const changeCase = (name: string) =>
 export const processSubmission = <Schema extends ZodTypeAny>(
 	formData: FormData,
 	schema: Schema,
-): output<Schema> => {
+) => {
 	const submission = parseWithZod(formData, { schema });
 	if (submission.status !== "success")
-		throw Response.json({ status: "idle", submission } as const);
-	if (!submission.value)
-		throw Response.json({ status: "error", submission } as const, {
-			status: 400,
+		throw Response.json({ status: "idle", submission } as const, {
+			status: 422,
 		});
 	return submission.value;
 };
@@ -138,13 +140,16 @@ export const cn = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
 export {
 	camelCase,
 	cloneDeep,
+	debounce,
 	groupBy,
 	inRange,
 	isBoolean,
 	isEmpty,
 	isEqual,
+	isFiniteNumber,
 	isInteger,
 	isNumber,
+	isPlainObject,
 	isString,
 	kebabCase,
 	mapValues,
@@ -152,10 +157,11 @@ export {
 	omitBy,
 	pickBy,
 	reverse,
-	set,
 	snakeCase,
 	sortBy,
 	startCase,
 	sum,
+	throttle,
 	truncate,
+	union,
 };

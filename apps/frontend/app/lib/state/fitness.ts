@@ -7,6 +7,7 @@ import {
 	type SetRestTimersSettings,
 	UserExerciseDetailsDocument,
 	type UserFitnessPreferences,
+	type UserMeasurement,
 	type UserUnitSystem,
 	UserWorkoutDetailsDocument,
 	type UserWorkoutDetailsQuery,
@@ -25,19 +26,19 @@ import type { NavigateFunction } from "react-router";
 import { $path } from "safe-routes";
 import { match } from "ts-pattern";
 import { v4 as randomUUID } from "uuid";
+import { CURRENT_WORKOUT_KEY } from "~/lib/shared/constants";
+import { dayjsLib, getTimeOfDay } from "~/lib/shared/date-utils";
+import { useS3PresignedUrls } from "~/lib/shared/hooks";
 import {
-	CURRENT_WORKOUT_KEY,
-	type FitnessAction,
 	clientGqlService,
-	dayjsLib,
-	getTimeOfDay,
 	queryClient,
 	queryFactory,
-} from "~/lib/common";
+} from "~/lib/shared/react-query";
+import { FitnessAction } from "~/lib/types";
 
 export type WorkoutDuration = {
-	from: string;
 	to?: string;
+	from: string;
 };
 
 export type ExerciseSet = {
@@ -45,6 +46,7 @@ export type ExerciseSet = {
 	identifier: string;
 	rpe?: number | null;
 	restTimerStartedAt?: string;
+	durationTimerTriggered?: true;
 	statistic: WorkoutSetStatistic;
 	note?: boolean | string | null;
 	displayRestTimeTrigger?: boolean;
@@ -87,12 +89,13 @@ export type InProgressWorkout = {
 	exercises: Array<Exercise>;
 	currentAction: FitnessAction;
 	replacingExerciseIdx?: number;
+	mergingExercise: string | null;
 	updateWorkoutTemplateId?: string;
 	durations: Array<WorkoutDuration>;
 	timerDrawerLot: "timer" | "stopwatch";
 };
 
-type CurrentWorkout = InProgressWorkout | null;
+export type CurrentWorkout = InProgressWorkout | null;
 
 const currentWorkoutAtom = atomWithStorage<CurrentWorkout>(
 	CURRENT_WORKOUT_KEY,
@@ -111,21 +114,20 @@ export const useGetSetAtIndex = (exerciseIdx: number, setIdx: number) => {
 	return exercise?.sets[setIdx];
 };
 
-export const getDefaultWorkout = (
-	fitnessEntity: FitnessAction,
-): InProgressWorkout => {
+export const getDefaultWorkout = (fitnessEntity: FitnessAction) => {
 	const date = dayjsLib().add(1, "second");
 	return {
 		images: [],
 		videos: [],
 		supersets: [],
 		exercises: [],
+		mergingExercise: null,
 		timerDrawerLot: "timer",
-		startTime: date.toISOString(),
 		currentAction: fitnessEntity,
+		startTime: date.toISOString(),
 		durations: [{ from: date.toISOString() }],
 		name: `${getTimeOfDay(date.hour())} Workout`,
-	};
+	} as InProgressWorkout;
 };
 
 export const getExerciseDetailsQuery = (exerciseId: string) =>
@@ -160,7 +162,7 @@ export const getWorkoutDetailsQuery = (workoutId: string) =>
 		queryFn: () =>
 			clientGqlService
 				.request(UserWorkoutDetailsDocument, { workoutId })
-				.then((data) => data.userWorkoutDetails),
+				.then((data) => data.userWorkoutDetails.response),
 	});
 
 export const getWorkoutDetails = async (workoutId: string) =>
@@ -173,10 +175,11 @@ export const getWorkoutTemplateDetailsQuery = (workoutTemplateId: string) =>
 		queryFn: () =>
 			clientGqlService
 				.request(UserWorkoutTemplateDetailsDocument, { workoutTemplateId })
-				.then((data) => data.userWorkoutTemplateDetails),
+				.then((data) => data.userWorkoutTemplateDetails.response),
 	});
 
-type TWorkoutDetails = UserWorkoutDetailsQuery["userWorkoutDetails"];
+export type TWorkoutDetails =
+	UserWorkoutDetailsQuery["userWorkoutDetails"]["response"];
 type TSet =
 	TWorkoutDetails["details"]["information"]["exercises"][number]["sets"][number];
 
@@ -216,13 +219,16 @@ export const currentWorkoutToCreateWorkoutInput = (
 			name: currentWorkout.name,
 			comment: currentWorkout.comment,
 			endTime: new Date().toISOString(),
-			duration: Math.trunc(totalDuration),
 			templateId: currentWorkout.templateId,
 			repeatedFrom: currentWorkout.repeatedFrom,
 			updateWorkoutId: currentWorkout.updateWorkoutId,
 			caloriesBurnt: currentWorkout.caloriesBurnt?.toString(),
-			updateWorkoutTemplateId: currentWorkout.updateWorkoutTemplateId,
 			startTime: new Date(currentWorkout.startTime).toISOString(),
+			updateWorkoutTemplateId: currentWorkout.updateWorkoutTemplateId,
+			duration:
+				currentWorkout.currentAction === FitnessAction.UpdateWorkout
+					? null
+					: Math.trunc(totalDuration),
 			assets: {
 				remoteImages: [],
 				remoteVideos: [],
@@ -269,11 +275,17 @@ export const currentWorkoutToCreateWorkoutInput = (
 	return input;
 };
 
+export type SetIdentifier = {
+	setIdentifier: string;
+	exerciseIdentifier: string;
+};
+
 export type CurrentWorkoutTimer = {
 	willEndAt: string;
 	totalTime: number;
 	wasPausedAt?: string;
-	triggeredBy?: { exerciseIdentifier: string; setIdentifier: string };
+	triggeredBy?: SetIdentifier;
+	confirmSetOnFinish?: SetIdentifier;
 };
 
 const currentWorkoutTimerAtom = atomWithStorage<CurrentWorkoutTimer | null>(
@@ -294,14 +306,21 @@ const currentWorkoutStopwatchAtom = atomWithStorage<CurrentWorkoutStopwatch>(
 export const useCurrentWorkoutStopwatchAtom = () =>
 	useAtom(currentWorkoutStopwatchAtom);
 
-const measurementsDrawerOpenAtom = atom(false);
+const measurementsDrawerAtom = atom<false | UserMeasurement | null>(false);
 
-export const useMeasurementsDrawerOpen = () =>
-	useAtom(measurementsDrawerOpenAtom);
+export const useMeasurementsDrawer = () => useAtom(measurementsDrawerAtom);
 
-export const mergingExerciseAtom = atom<string | null>(null);
-
-export const useMergingExercise = () => useAtom(mergingExerciseAtom);
+export const useMergingExercise = () => {
+	const [currentWorkout, setCurrentWorkout] = useCurrentWorkout();
+	const setMergingExercise = (value: string | null) => {
+		setCurrentWorkout((prev) => {
+			if (!prev) return prev;
+			if (prev.mergingExercise === value) return prev;
+			return { ...prev, mergingExercise: value };
+		});
+	};
+	return [currentWorkout?.mergingExercise ?? null, setMergingExercise] as const;
+};
 
 export const duplicateOldWorkout = async (
 	name: string,
@@ -381,14 +400,14 @@ export const addExerciseToCurrentWorkout = async (
 	currentWorkout: InProgressWorkout,
 	userFitnessPreferences: UserFitnessPreferences,
 	setCurrentWorkout: (v: InProgressWorkout) => void,
-	selectedExercises: Array<{ name: string; lot: ExerciseLot }>,
+	selectedExercises: Array<{ id: string; lot: ExerciseLot }>,
 ) => {
 	const draft = createDraft(currentWorkout);
 	for (const [_exerciseIdx, ex] of selectedExercises.entries()) {
 		const setLot = SetLot.Normal;
 		const restTimer = await getRestTimerForSet(
 			setLot,
-			ex.name,
+			ex.id,
 			userFitnessPreferences.exercises.setRestTimers,
 		);
 		let sets: ExerciseSet[] = [
@@ -400,7 +419,7 @@ export const addExerciseToCurrentWorkout = async (
 				restTimer: restTimer ? { duration: restTimer } : undefined,
 			},
 		];
-		const exerciseDetails = await getExerciseDetails(ex.name);
+		const exerciseDetails = await getExerciseDetails(ex.id);
 		const history = (exerciseDetails.userDetails.history || []).at(0);
 		if (history) {
 			const workout = await getWorkoutDetails(history.workoutId);
@@ -414,7 +433,7 @@ export const addExerciseToCurrentWorkout = async (
 			images: [],
 			videos: [],
 			lot: ex.lot,
-			exerciseId: ex.name,
+			exerciseId: ex.id,
 			identifier: randomUUID(),
 			unitSystem: userFitnessPreferences.exercises.unitSystem,
 		});
@@ -424,11 +443,12 @@ export const addExerciseToCurrentWorkout = async (
 	navigate($path("/fitness/:action", { action: currentWorkout.currentAction }));
 };
 
-export const getExerciseImages = (
+export const useExerciseImages = (
 	exercise?: ExerciseDetailsQuery["exerciseDetails"],
 ) => {
+	const s3PresignedUrls = useS3PresignedUrls(exercise?.assets.s3Images);
 	return [
-		...(exercise?.attributes.assets.s3Images || []),
-		...(exercise?.attributes.assets.remoteImages || []),
+		...(s3PresignedUrls.data || []),
+		...(exercise?.assets.remoteImages || []),
 	];
 };

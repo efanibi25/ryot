@@ -1,13 +1,13 @@
-use std::fs;
+use std::fs::read_to_string;
 
-use async_graphql::Result;
+use anyhow::Result;
 use dependent_models::{CompleteExport, ImportCompletedItem, ImportResult};
 use enum_models::ImportSource;
 use itertools::Itertools;
-use media_models::DeployJsonImportInput;
+use media_models::{CreateOrUpdateCollectionInput, DeployPathImportInput};
 
-pub async fn import(input: DeployJsonImportInput) -> Result<ImportResult> {
-    let export = fs::read_to_string(input.export)?;
+pub async fn import(input: DeployPathImportInput) -> Result<ImportResult> {
+    let export = read_to_string(input.export_path)?;
     let complete_data = serde_json::from_str::<CompleteExport>(&export).unwrap();
 
     let media = complete_data
@@ -16,8 +16,8 @@ pub async fn import(input: DeployJsonImportInput) -> Result<ImportResult> {
         .iter_mut()
         .map(|m| {
             m.seen_history.iter_mut().for_each(|s| {
-                if s.provider_watched_on.is_none() {
-                    s.provider_watched_on = Some(ImportSource::GenericJson.to_string());
+                if s.providers_consumed_on.is_none() {
+                    s.providers_consumed_on = Some(vec![ImportSource::GenericJson.to_string()]);
                 }
             });
             m.to_owned()
@@ -39,6 +39,15 @@ pub async fn import(input: DeployJsonImportInput) -> Result<ImportResult> {
     }
     for media_group in complete_data.metadata_groups.unwrap_or_default() {
         completed.push(ImportCompletedItem::MetadataGroup(media_group));
+    }
+    for collection in complete_data.collections.unwrap_or_default() {
+        let collection_input = CreateOrUpdateCollectionInput {
+            name: collection.name,
+            description: collection.description,
+            information_template: collection.information_template,
+            ..Default::default()
+        };
+        completed.push(ImportCompletedItem::Collection(collection_input));
     }
     Ok(ImportResult {
         completed,

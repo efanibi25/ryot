@@ -5,6 +5,7 @@ import "@mantine/carousel/styles.css";
 import "@mantine/dates/styles.css";
 import "@mantine/notifications/styles.css";
 import "mantine-datatable/styles.layer.css";
+import { useRegisterSW } from "virtual:pwa-register/react";
 import {
 	ActionIcon,
 	Alert,
@@ -31,7 +32,8 @@ import {
 	useNavigation,
 } from "react-router";
 import { Toaster } from "~/components/toaster";
-import { LOGO_IMAGE_URL, queryClient } from "~/lib/common";
+import { LOGO_IMAGE_URL } from "~/lib/shared/constants";
+import { queryClient } from "~/lib/shared/react-query";
 import {
 	colorSchemeCookie,
 	extendResponseHeaders,
@@ -99,16 +101,29 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 	const headers = new Headers();
 	const defaultColorScheme = colorScheme || "light";
 	if (toastHeaders) extendResponseHeaders(headers, toastHeaders);
-	return data({ toast, defaultColorScheme }, { headers });
+	return data(
+		{
+			toast,
+			defaultColorScheme,
+			isDevelopmentMode: process.env.NODE_ENV === "development",
+		},
+		{ headers },
+	);
 };
 
 export default function App() {
 	const navigation = useNavigation();
 	const loaderData = useLoaderData<typeof loader>();
+	useRegisterSW({
+		onNeedRefresh: () => location.reload(),
+	});
 
 	return (
 		<html lang="en">
 			<head>
+				{loaderData.isDevelopmentMode ? (
+					<script src="https://unpkg.com/react-scan/dist/auto.global.js" />
+				) : null}
 				<meta charSet="utf-8" />
 				<meta
 					name="viewport"

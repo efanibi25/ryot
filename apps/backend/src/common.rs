@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use apalis::prelude::MemoryStorage;
 use application_utils::{AuthContext, create_oidc_client};
@@ -10,35 +10,62 @@ use axum::{
     http::{Method, header},
     routing::{Router, get, post},
 };
-use background_models::{ApplicationJob, HpApplicationJob, LpApplicationJob, MpApplicationJob};
+use background_models::{
+    ApplicationJob, HpApplicationJob, LpApplicationJob, MpApplicationJob, SingleApplicationJob,
+};
 use bon::builder;
-use cache_service::CacheService;
-use collection_resolver::{CollectionMutation, CollectionQuery};
+use collection_resolver::{CollectionMutationResolver, CollectionQueryResolver};
 use collection_service::CollectionService;
-use exporter_resolver::{ExporterMutation, ExporterQuery};
+use config_definition::AppConfig;
+use custom_resolver::CustomMutationResolver;
+use custom_service::CustomService;
+use exporter_resolver::{ExporterMutationResolver, ExporterQueryResolver};
 use exporter_service::ExporterService;
-use file_storage_resolver::{FileStorageMutation, FileStorageQuery};
+use file_storage_resolver::{FileStorageMutationResolver, FileStorageQueryResolver};
 use file_storage_service::FileStorageService;
-use fitness_resolver::{FitnessMutation, FitnessQuery};
+use fitness_resolver::{FitnessMutationResolver, FitnessQueryResolver};
 use fitness_service::FitnessService;
-use futures::future::join_all;
-use importer_resolver::{ImporterMutation, ImporterQuery};
+use futures::try_join;
+use importer_resolver::{ImporterMutationResolver, ImporterQueryResolver};
 use importer_service::ImporterService;
 use integration_service::IntegrationService;
 use itertools::Itertools;
-use miscellaneous_resolver::{MiscellaneousMutation, MiscellaneousQuery};
+use miscellaneous_filter_preset_resolver::{
+    MiscellaneousFilterPresetMutationResolver, MiscellaneousFilterPresetQueryResolver,
+};
+use miscellaneous_grouping_resolver::MiscellaneousGroupingQueryResolver;
+use miscellaneous_metadata_resolver::{
+    MiscellaneousMetadataMutationResolver, MiscellaneousMetadataQueryResolver,
+};
+use miscellaneous_search_resolver::MiscellaneousSearchQueryResolver;
 use miscellaneous_service::MiscellaneousService;
-use router_resolver::{config_handler, graphql_playground, integration_webhook, upload_file};
+use miscellaneous_social_resolver::{
+    MiscellaneousSocialMutationResolver, MiscellaneousSocialQueryResolver,
+};
+use miscellaneous_system_resolver::{
+    MiscellaneousSystemMutationResolver, MiscellaneousSystemQueryResolver,
+};
+use miscellaneous_tracking_resolver::{
+    MiscellaneousTrackingMutationResolver, MiscellaneousTrackingQueryResolver,
+};
+use router_resolver::{
+    config_handler, download_logs_handler, graphql_playground_handler, integration_webhook_handler,
+    upload_file_handler,
+};
 use sea_orm::DatabaseConnection;
-use statistics_resolver::StatisticsQuery;
+use statistics_resolver::StatisticsQueryResolver;
 use statistics_service::StatisticsService;
 use supporting_service::SupportingService;
 use tower_http::{
     catch_panic::CatchPanicLayer as TowerCatchPanicLayer, cors::CorsLayer as TowerCorsLayer,
     trace::TraceLayer as TowerTraceLayer,
 };
-use user_resolver::{UserMutation, UserQuery};
+use user_authentication_resolver::{
+    UserAuthenticationMutationResolver, UserAuthenticationQueryResolver,
+};
+use user_management_resolver::{UserManagementMutationResolver, UserManagementQueryResolver};
 use user_service::UserService;
+use user_services_resolver::{UserServicesMutationResolver, UserServicesQueryResolver};
 
 /// All the services that are used by the app
 pub struct AppServices {
@@ -54,40 +81,38 @@ pub struct AppServices {
 #[builder]
 pub async fn create_app_services(
     db: DatabaseConnection,
+    config: Arc<AppConfig>,
+    log_file_path: PathBuf,
     timezone: chrono_tz::Tz,
-    s3_client: aws_sdk_s3::Client,
-    config: Arc<config::AppConfig>,
     lp_application_job: &MemoryStorage<LpApplicationJob>,
     mp_application_job: &MemoryStorage<MpApplicationJob>,
     hp_application_job: &MemoryStorage<HpApplicationJob>,
+    single_application_job: &MemoryStorage<SingleApplicationJob>,
 ) -> (Router, Arc<AppServices>) {
     let is_oidc_enabled = create_oidc_client(&config).await.is_some();
-    let file_storage_service = Arc::new(FileStorageService::new(
-        s3_client,
-        config.file_storage.s3_bucket_name.clone(),
-    ));
-    let cache_service = CacheService::new(&db, config.clone());
     let supporting_service = Arc::new(
         SupportingService::builder()
             .db(&db)
             .timezone(timezone)
             .config(config.clone())
-            .cache_service(cache_service)
+            .log_file_path(log_file_path)
             .is_oidc_enabled(is_oidc_enabled)
             .lp_application_job(lp_application_job)
             .mp_application_job(mp_application_job)
             .hp_application_job(hp_application_job)
-            .file_storage_service(file_storage_service.clone())
+            .single_application_job(single_application_job)
             .build()
             .await,
     );
     let user_service = Arc::new(UserService(supporting_service.clone()));
-    let importer_service = Arc::new(ImporterService(supporting_service.clone()));
+    let custom_service = Arc::new(CustomService(supporting_service.clone()));
     let fitness_service = Arc::new(FitnessService(supporting_service.clone()));
     let exporter_service = Arc::new(ExporterService(supporting_service.clone()));
+    let importer_service = Arc::new(ImporterService(supporting_service.clone()));
     let collection_service = Arc::new(CollectionService(supporting_service.clone()));
     let statistics_service = Arc::new(StatisticsService(supporting_service.clone()));
     let integration_service = Arc::new(IntegrationService(supporting_service.clone()));
+    let file_storage_service = Arc::new(FileStorageService(supporting_service.clone()));
     let miscellaneous_service = Arc::new(MiscellaneousService(supporting_service.clone()));
     let schema = Schema::build(
         QueryRoot::default(),
@@ -96,6 +121,7 @@ pub async fn create_app_services(
     )
     .extension(Tracing)
     .data(user_service.clone())
+    .data(custom_service.clone())
     .data(fitness_service.clone())
     .data(importer_service.clone())
     .data(exporter_service.clone())
@@ -120,37 +146,38 @@ pub async fn create_app_services(
 
     let webhook_routes = Router::new().route(
         "/integrations/{integration_slug}",
-        post(integration_webhook),
+        post(integration_webhook_handler),
     );
-
-    join_all(
-        [
-            MpApplicationJob::SyncIntegrationsData,
-            MpApplicationJob::UpdateExerciseLibrary,
-        ]
-        .map(|job| supporting_service.perform_application_job(ApplicationJob::Mp(job))),
-    )
-    .await;
 
     let mut gql = post(graphql_handler);
     if config.server.graphql_playground_enabled {
-        gql = gql.get(graphql_playground);
+        gql = gql.get(graphql_playground_handler);
     }
 
     let app_router = Router::new()
         .nest("/webhooks", webhook_routes)
         .route("/config", get(config_handler))
         .route("/graphql", gql)
-        .route("/upload", post(upload_file))
-        .layer(Extension(config.clone()))
-        .layer(Extension(integration_service.clone()))
+        .route("/upload", post(upload_file_handler))
+        .route("/logs/download/{token}", get(download_logs_handler))
         .layer(Extension(schema))
+        .layer(Extension(config.clone()))
+        .layer(Extension(supporting_service.clone()))
+        .layer(Extension(integration_service.clone()))
         .layer(TowerTraceLayer::new_for_http())
         .layer(TowerCatchPanicLayer::new())
         .layer(DefaultBodyLimit::max(
             1024 * 1024 * config.server.max_file_size_mb,
         ))
         .layer(cors);
+
+    let _ = try_join!(
+        miscellaneous_service.core_details(),
+        supporting_service
+            .perform_application_job(ApplicationJob::Mp(MpApplicationJob::SyncIntegrationsData)),
+        supporting_service
+            .perform_application_job(ApplicationJob::Mp(MpApplicationJob::UpdateExerciseLibrary)),
+    );
 
     (
         app_router,
@@ -168,25 +195,40 @@ pub async fn create_app_services(
 
 #[derive(MergedObject, Default)]
 pub struct QueryRoot(
-    MiscellaneousQuery,
-    ImporterQuery,
-    ExporterQuery,
-    FitnessQuery,
-    FileStorageQuery,
-    StatisticsQuery,
-    CollectionQuery,
-    UserQuery,
+    FitnessQueryResolver,
+    ImporterQueryResolver,
+    ExporterQueryResolver,
+    StatisticsQueryResolver,
+    CollectionQueryResolver,
+    FileStorageQueryResolver,
+    UserServicesQueryResolver,
+    UserManagementQueryResolver,
+    UserAuthenticationQueryResolver,
+    MiscellaneousSearchQueryResolver,
+    MiscellaneousSocialQueryResolver,
+    MiscellaneousSystemQueryResolver,
+    MiscellaneousGroupingQueryResolver,
+    MiscellaneousTrackingQueryResolver,
+    MiscellaneousMetadataQueryResolver,
+    MiscellaneousFilterPresetQueryResolver,
 );
 
 #[derive(MergedObject, Default)]
 pub struct MutationRoot(
-    MiscellaneousMutation,
-    ImporterMutation,
-    ExporterMutation,
-    FitnessMutation,
-    FileStorageMutation,
-    CollectionMutation,
-    UserMutation,
+    CustomMutationResolver,
+    FitnessMutationResolver,
+    ExporterMutationResolver,
+    ImporterMutationResolver,
+    CollectionMutationResolver,
+    FileStorageMutationResolver,
+    UserServicesMutationResolver,
+    UserManagementMutationResolver,
+    UserAuthenticationMutationResolver,
+    MiscellaneousSocialMutationResolver,
+    MiscellaneousSystemMutationResolver,
+    MiscellaneousTrackingMutationResolver,
+    MiscellaneousMetadataMutationResolver,
+    MiscellaneousFilterPresetMutationResolver,
 );
 
 pub type GraphqlSchema = Schema<QueryRoot, MutationRoot, EmptySubscription>;

@@ -6,18 +6,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use apalis::{
     layers::WorkerBuilderExt,
     prelude::{MemoryStorage, Monitor, WorkerBuilder, WorkerFactoryFn},
 };
 use apalis_cron::{CronStream, Schedule};
-use aws_sdk_s3::config::Region;
-use common_utils::{PROJECT_NAME, TEMPORARY_DIRECTORY, ryot_log};
+use common_utils::{PROJECT_NAME, get_temporary_directory, ryot_log};
+use config_definition::AppConfig;
 use dependent_models::CompleteExport;
+use english_to_cron::str_cron_syntax;
 use env_utils::APP_VERSION;
-use logs_wheel::LogFileInitializer;
-use migrations::Migrator;
+use migrations_sql::Migrator;
 use schematic::schema::{SchemaGenerator, TypeScriptRenderer, YamlTemplateRenderer};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -32,15 +32,15 @@ use crate::{
     common::create_app_services,
     job::{
         perform_hp_application_job, perform_lp_application_job, perform_mp_application_job,
-        run_background_jobs, run_frequent_jobs,
+        perform_single_application_job, run_frequent_cron_jobs, run_infrequent_cron_jobs,
     },
 };
 
 mod common;
 mod job;
 
-static BASE_DIR: &str = env!("CARGO_MANIFEST_DIR");
 static LOGGING_ENV_VAR: &str = "RUST_LOG";
+static BASE_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,58 +48,46 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     match env::var(LOGGING_ENV_VAR).ok() {
+        None => unsafe { env::set_var(LOGGING_ENV_VAR, "ryot=info,sea_orm=info") },
         Some(v) => {
             if !v.contains("sea_orm") {
-                unsafe { env::set_var(LOGGING_ENV_VAR, format!("{},sea_orm=info", v)) };
+                unsafe { env::set_var(LOGGING_ENV_VAR, format!("{v},sea_orm=info")) };
             }
         }
-        None => unsafe { env::set_var(LOGGING_ENV_VAR, "ryot=info,sea_orm=info") },
     }
-    init_tracing()?;
+    let log_file_path = init_tracing()?;
 
     ryot_log!(info, "Running version: {}", APP_VERSION);
 
-    let config = Arc::new(config::load_app_config()?);
+    let config = Arc::new(config_definition::load_app_config()?);
+
+    let tz: chrono_tz::Tz = config.tz.parse().unwrap();
+    ryot_log!(info, "Timezone: {}", tz);
+
+    let port = config.server.backend_port;
+    let host = config.server.backend_host.clone();
+    let disable_background_jobs = config.server.disable_background_jobs;
+
+    let (infrequent_scheduler, frequent_scheduler) = get_cron_schedules(&config, tz)?;
+
     if config.server.sleep_before_startup_seconds > 0 {
         let duration = Duration::from_secs(config.server.sleep_before_startup_seconds);
         ryot_log!(warn, "Sleeping for {:?} before starting up...", duration);
         sleep(duration).await;
     }
 
-    let sync_every_minutes = config.integration.sync_every_minutes;
-    let disable_background_jobs = config.server.disable_background_jobs;
-
-    let config_dump_path = PathBuf::new().join(TEMPORARY_DIRECTORY).join("config.json");
+    let config_dump_path = PathBuf::new()
+        .join(get_temporary_directory())
+        .join("config.json");
     fs::write(config_dump_path, serde_json::to_string_pretty(&config)?)?;
-
-    let mut aws_conf = aws_sdk_s3::Config::builder()
-        .region(Region::new(config.file_storage.s3_region.clone()))
-        .force_path_style(true);
-    if !config.file_storage.s3_url.is_empty() {
-        aws_conf = aws_conf.endpoint_url(&config.file_storage.s3_url);
-    }
-    if !config.file_storage.s3_access_key_id.is_empty()
-        && !config.file_storage.s3_secret_access_key.is_empty()
-    {
-        aws_conf = aws_conf.credentials_provider(aws_sdk_s3::config::Credentials::new(
-            &config.file_storage.s3_access_key_id,
-            &config.file_storage.s3_secret_access_key,
-            None,
-            None,
-            PROJECT_NAME,
-        ));
-    }
-    let aws_conf = aws_conf.build();
-    let s3_client = aws_sdk_s3::Client::from_conf(aws_conf);
 
     let db = Database::connect(config.database.url.clone())
         .await
         .expect("Database connection failed");
 
-    if let Err(err) = migrate_from_v7_if_applicable(&db).await {
-        ryot_log!(error, "Migration from v7 failed: {}", err);
-        bail!("There was an error migrating from v7.")
-    }
+    migrate_from_v8_if_applicable(&db)
+        .await
+        .context("There was an error migrating from v8")?;
 
     if let Err(err) = Migrator::up(&db, None).await {
         ryot_log!(error, "Database migration failed: {}", err);
@@ -109,20 +97,17 @@ async fn main() -> Result<()> {
     let lp_application_job_storage = MemoryStorage::new();
     let mp_application_job_storage = MemoryStorage::new();
     let hp_application_job_storage = MemoryStorage::new();
-
-    let tz: chrono_tz::Tz = env::var("TZ")
-        .map(|s| s.parse().unwrap())
-        .unwrap_or_else(|_| chrono_tz::Etc::GMT);
-    ryot_log!(info, "Timezone: {}", tz);
+    let single_application_job_storage = MemoryStorage::new();
 
     let (app_router, app_services) = create_app_services()
         .db(db)
         .timezone(tz)
         .config(config)
-        .s3_client(s3_client)
+        .log_file_path(log_file_path)
         .lp_application_job(&lp_application_job_storage)
         .mp_application_job(&mp_application_job_storage)
         .hp_application_job(&hp_application_job_storage)
+        .single_application_job(&single_application_job_storage)
         .call()
         .await;
 
@@ -139,7 +124,7 @@ async fn main() -> Result<()> {
             .join("includes");
 
         let mut generator = SchemaGenerator::default();
-        generator.add::<config::AppConfig>();
+        generator.add::<AppConfig>();
         generator
             .generate(
                 base_dir.join("backend-config-schema.yaml"),
@@ -157,36 +142,25 @@ async fn main() -> Result<()> {
             .ok();
     }
 
-    let host = env::var("BACKEND_HOST").unwrap_or_else(|_| "0.0.0.0".to_owned());
-    let port = env::var("BACKEND_PORT")
-        .unwrap_or_else(|_| "5000".to_owned())
-        .parse::<usize>()
-        .unwrap();
     let listener = TcpListener::bind(format!("{host}:{port}")).await.unwrap();
     ryot_log!(info, "Listening on: {}", listener.local_addr()?);
 
     let monitor = Monitor::new()
         .register(
-            WorkerBuilder::new("daily_background_jobs")
+            WorkerBuilder::new("infrequent_cron_jobs")
                 .enable_tracing()
                 .catch_panic()
                 .data(app_services.clone())
-                .backend(
-                    // every day
-                    CronStream::new_with_timezone(Schedule::from_str("0 0 0 * * *").unwrap(), tz),
-                )
-                .build_fn(run_background_jobs),
+                .backend(CronStream::new_with_timezone(infrequent_scheduler, tz))
+                .build_fn(run_infrequent_cron_jobs),
         )
         .register(
-            WorkerBuilder::new("frequent_jobs")
+            WorkerBuilder::new("frequent_cron_jobs")
                 .enable_tracing()
                 .catch_panic()
                 .data(app_services.clone())
-                .backend(CronStream::new_with_timezone(
-                    Schedule::from_str(&format!("0 */{} * * * *", sync_every_minutes)).unwrap(),
-                    tz,
-                ))
-                .build_fn(run_frequent_jobs),
+                .backend(CronStream::new_with_timezone(frequent_scheduler, tz))
+                .build_fn(run_frequent_cron_jobs),
         )
         // application jobs
         .register(
@@ -211,9 +185,18 @@ async fn main() -> Result<()> {
                 .catch_panic()
                 .enable_tracing()
                 .rate_limit(20, Duration::new(5, 0))
-                .data(app_services)
+                .data(app_services.clone())
                 .backend(lp_application_job_storage)
                 .build_fn(perform_lp_application_job),
+        )
+        .register(
+            WorkerBuilder::new("perform_single_application_job")
+                .catch_panic()
+                .enable_tracing()
+                .rate_limit(1, Duration::new(1, 0))
+                .data(app_services)
+                .backend(single_application_job_storage)
+                .build_fn(perform_single_application_job),
         )
         .run();
 
@@ -228,17 +211,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() -> Result<()> {
-    let tmp_dir = PathBuf::new().join(TEMPORARY_DIRECTORY);
+fn init_tracing() -> Result<PathBuf> {
+    let tmp_dir = PathBuf::new().join(get_temporary_directory());
+    let file_path = tmp_dir.join(PROJECT_NAME);
     create_dir_all(&tmp_dir)?;
-    let log_file = LogFileInitializer {
-        max_n_old_files: 2,
-        directory: tmp_dir,
-        filename: PROJECT_NAME,
-        preferred_max_file_size_mib: 1,
-    }
-    .init()?;
-    let writer = Mutex::new(log_file);
+    let file_appender = tracing_appender::rolling::never(tmp_dir, PROJECT_NAME);
+    let writer = Mutex::new(file_appender);
     tracing::subscriber::set_global_default(
         fmt::Subscriber::builder()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -246,10 +224,38 @@ fn init_tracing() -> Result<()> {
             .with(fmt::Layer::default().with_writer(writer).with_ansi(false)),
     )
     .expect("Unable to set global tracing subscriber");
-    Ok(())
+    Ok(file_path)
 }
 
-async fn migrate_from_v7_if_applicable(db: &DatabaseConnection) -> Result<()> {
+fn get_cron_schedules(config: &Arc<AppConfig>, tz: chrono_tz::Tz) -> Result<(Schedule, Schedule)> {
+    let frequent_cron_jobs_every_minutes = config.scheduler.frequent_cron_jobs_every_minutes;
+    let infrequent_cron_jobs_hours_format =
+        config.scheduler.infrequent_cron_jobs_hours_format.clone();
+
+    let infrequent_format = match infrequent_cron_jobs_hours_format.as_str() {
+        "0" => str_cron_syntax(&config.scheduler.infrequent_cron_jobs_schedule)?,
+        _ => format!("0 0 {infrequent_cron_jobs_hours_format} * * *"),
+    };
+
+    let infrequent_scheduler = Schedule::from_str(&infrequent_format)?;
+    log_cron_schedule(stringify!(infrequent_scheduler), &infrequent_scheduler, tz);
+
+    let frequent_format = match frequent_cron_jobs_every_minutes {
+        5 => str_cron_syntax(&config.scheduler.frequent_cron_jobs_schedule)?,
+        _ => format!("0 */{frequent_cron_jobs_every_minutes} * * * *"),
+    };
+    let frequent_scheduler = Schedule::from_str(&frequent_format)?;
+    log_cron_schedule(stringify!(frequent_scheduler), &frequent_scheduler, tz);
+
+    Ok((infrequent_scheduler, frequent_scheduler))
+}
+
+fn log_cron_schedule(name: &str, schedule: &Schedule, tz: chrono_tz::Tz) {
+    let times = schedule.upcoming(tz).take(5).collect::<Vec<_>>();
+    ryot_log!(info, "Schedule for {name:#?}: {times:?} and so on...");
+}
+
+async fn migrate_from_v8_if_applicable(db: &DatabaseConnection) -> Result<()> {
     db.execute_unprepared(
         r#"
 DO $$
@@ -260,13 +266,13 @@ BEGIN
     ) THEN
         IF EXISTS (
             SELECT 1 FROM seaql_migrations
-            WHERE version = 'm20240825_is_v7_migration'
+            WHERE version = 'm20250118_is_v8_migration'
         ) THEN
             IF NOT EXISTS (
                 SELECT 1 FROM seaql_migrations
-                WHERE version = 'm20250117_is_last_v7_migration'
+                WHERE version = 'm20250731_is_last_v8_migration'
             ) THEN
-                RAISE EXCEPTION 'Final migration for v7 does not exist, upgrade aborted.';
+                RAISE EXCEPTION 'Final migration for v8 does not exist, upgrade aborted.';
             END IF;
 
             DELETE FROM seaql_migrations;
@@ -276,14 +282,14 @@ BEGIN
                 ('m20230410_create_metadata', 1684693318),
                 ('m20230411_create_metadata_group', 1684693319),
                 ('m20230413_create_person', 1684693320),
-                ('m20230419_create_seen', 1684693321),
                 ('m20230502_create_genre', 1684693322),
                 ('m20230504_create_collection', 1684693323),
                 ('m20230505_create_exercise', 1684693324),
                 ('m20230506_create_workout_template', 1684693325),
                 ('m20230507_create_workout', 1684693326),
                 ('m20230508_create_review', 1684693327),
-                ('m20230509_create_import_report', 1684693328),
+                ('m20230510_create_seen', 1684693321),
+                ('m20230513_create_import_report', 1684693328),
                 ('m20230820_create_user_measurement', 1684693329),
                 ('m20230912_create_calendar_event', 1684693330),
                 ('m20231016_create_collection_to_entity', 1684693331),
@@ -294,8 +300,7 @@ BEGIN
                 ('m20240714_create_access_link', 1684693336),
                 ('m20240827_create_daily_user_activity', 1684693337),
                 ('m20240904_create_monitored_entity', 1684693338),
-                ('m20241004_create_application_cache', 1684693339),
-                ('m20241214_create_user_notification', 1684693340);
+                ('m20241004_create_application_cache', 1684693339);
         END IF;
     END IF;
 END $$;

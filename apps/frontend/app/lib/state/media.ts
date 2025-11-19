@@ -4,68 +4,79 @@ import {
 	type ReviewItem,
 } from "@ryot/generated/graphql/backend/graphql";
 import { atom, useAtom } from "jotai";
-import { useState } from "react";
-import type { DeepPartial } from "ts-essentials";
 import { match } from "ts-pattern";
 import {
 	getMetadataDetailsQuery,
 	getUserMetadataDetailsQuery,
 	queryClient,
-} from "~/lib/common";
+} from "~/lib/shared/react-query";
 
 export type UpdateProgressData = {
 	metadataId: string;
+	showSeasonNumber?: number;
+	mangaVolumeNumber?: number;
+	showEpisodeNumber?: number;
+	animeEpisodeNumber?: number;
+	mangaChapterNumber?: string;
+	podcastEpisodeNumber?: number;
+	providersConsumedOn?: string[];
 	showAllEpisodesBefore?: boolean;
-	showSeasonNumber?: number | null;
-	showEpisodeNumber?: number | null;
-	podcastEpisodeNumber?: number | null;
-	animeEpisodeNumber?: number | null;
-	mangaChapterNumber?: string | null;
-	mangaVolumeNumber?: number | null;
+	animeAllEpisodesBefore?: boolean;
+	podcastAllEpisodesBefore?: boolean;
+	showSeasonEpisodesBefore?: boolean;
+	mangaAllChaptersOrVolumesBefore?: boolean;
 };
 
 const metadataProgressUpdateAtom = atom<UpdateProgressData | null>(null);
 
 export const useMetadataProgressUpdate = () => {
-	const [isLoading, setIsLoading] = useState(false);
-	const [metadataProgress, _setMetadataProgress] = useAtom(
+	const [metadataToUpdate, updateMetadataToUpdate] = useAtom(
 		metadataProgressUpdateAtom,
 	);
-	const setMetadataProgress = async (
+
+	const initializeMetadataToUpdate = async (
 		draft: UpdateProgressData | null,
 		determineNext?: boolean,
 	) => {
-		setIsLoading(true);
-		if (draft && determineNext) {
+		if (draft) {
 			const [metadataDetails, userMetadataDetails] = await Promise.all([
 				queryClient.ensureQueryData(getMetadataDetailsQuery(draft.metadataId)),
 				queryClient.ensureQueryData(
 					getUserMetadataDetailsQuery(draft.metadataId),
 				),
 			]);
-			const nextEntry = userMetadataDetails?.nextEntry;
-			if (nextEntry) {
-				match(metadataDetails.lot)
-					.with(MediaLot.Show, () => {
-						draft.showEpisodeNumber = nextEntry.episode;
-						draft.showSeasonNumber = nextEntry.season;
-					})
-					.with(MediaLot.Podcast, () => {
-						draft.podcastEpisodeNumber = nextEntry.episode;
-					})
-					.with(MediaLot.Anime, () => {
-						draft.animeEpisodeNumber = nextEntry.episode;
-					})
-					.with(MediaLot.Manga, () => {
-						draft.mangaChapterNumber = nextEntry.chapter;
-					})
-					.otherwise(() => undefined);
+			draft.providersConsumedOn = [
+				...(userMetadataDetails.history.at(0)?.providersConsumedOn || []),
+			];
+			if (determineNext) {
+				const nextEntry = userMetadataDetails?.nextEntry;
+				if (nextEntry) {
+					match(metadataDetails.lot)
+						.with(MediaLot.Manga, () => {
+							draft.mangaChapterNumber = nextEntry.chapter || undefined;
+						})
+						.with(MediaLot.Anime, () => {
+							draft.animeEpisodeNumber = nextEntry.episode || undefined;
+						})
+						.with(MediaLot.Podcast, () => {
+							draft.podcastEpisodeNumber = nextEntry.episode || undefined;
+						})
+						.with(MediaLot.Show, () => {
+							draft.showSeasonNumber = nextEntry.season || undefined;
+							draft.showEpisodeNumber = nextEntry.episode || undefined;
+						})
+						.otherwise(() => undefined);
+				}
 			}
 		}
-		setIsLoading(false);
-		_setMetadataProgress(draft);
+		updateMetadataToUpdate(draft);
 	};
-	return [metadataProgress, setMetadataProgress, isLoading] as const;
+
+	return {
+		metadataToUpdate,
+		updateMetadataToUpdate,
+		initializeMetadataToUpdate,
+	};
 };
 
 export type ReviewEntityData = {
@@ -73,7 +84,7 @@ export type ReviewEntityData = {
 	entityLot: EntityLot;
 	entityTitle: string;
 	metadataLot?: MediaLot;
-	existingReview?: DeepPartial<ReviewItem>;
+	existingReview?: Partial<ReviewItem>;
 };
 
 export const reviewEntityAtom = atom<ReviewEntityData | null>(null);
@@ -85,7 +96,6 @@ export const useReviewEntity = () => {
 export type AddEntityToCollectionsData = {
 	entityId: string;
 	entityLot: EntityLot;
-	alreadyInCollections?: Array<string>;
 };
 
 export const addEntityToCollectionsAtom =

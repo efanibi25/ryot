@@ -2,20 +2,18 @@ import {
 	ActionIcon,
 	Box,
 	Button,
-	Center,
 	Container,
 	Flex,
 	Group,
-	Pagination,
 	Select,
 	SimpleGrid,
-	Skeleton,
 	Stack,
 	Tabs,
 	Text,
 	Title,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
+import { notifications } from "@mantine/notifications";
 import {
 	CollectionContentsDocument,
 	type CollectionContentsInput,
@@ -23,150 +21,188 @@ import {
 	CollectionRecommendationsDocument,
 	type CollectionRecommendationsInput,
 	EntityLot,
+	type EntityWithLot,
+	FilterPresetContextType,
 	GraphqlSortOrder,
 	MediaLot,
+	ReorderCollectionEntityDocument,
+	type ReorderCollectionEntityInput,
 } from "@ryot/generated/graphql/backend/graphql";
-import {
-	cloneDeep,
-	parseParameters,
-	parseSearchQuery,
-	startCase,
-	zodIntAsString,
-} from "@ryot/ts-utils";
+import { cloneDeep, isNumber } from "@ryot/ts-utils";
 import {
 	IconBucketDroplet,
+	IconEdit,
 	IconFilter,
 	IconMessageCircle2,
-	IconSortAscending,
-	IconSortDescending,
 	IconStar,
 	IconTrashFilled,
 	IconUser,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { useLoaderData, useNavigate } from "react-router";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router";
 import { $path } from "safe-routes";
+import invariant from "tiny-invariant";
 import { useLocalStorage } from "usehooks-ts";
-import { z } from "zod";
 import {
-	ApplicationGrid,
-	BulkEditingAffix,
-	DebouncedSearchInput,
+	ApplicationPagination,
 	DisplayCollectionEntity,
 	DisplayListDetailsAndRefresh,
-	FiltersModal,
-	ReviewItemDisplay,
+	SkeletonLoader,
 } from "~/components/common";
-import { MetadataDisplayItem } from "~/components/media";
+import { BulkCollectionEditingAffix } from "~/components/common/BulkCollectionEditingAffix";
+import {
+	FilterPresetBar,
+	FilterPresetModalManager,
+} from "~/components/common/filter-presets";
+import {
+	DebouncedSearchInput,
+	FiltersModal,
+	SortOrderToggle,
+} from "~/components/common/filters";
+import { ApplicationGrid } from "~/components/common/layout";
+import { ReviewItemDisplay } from "~/components/common/review";
+import { MetadataDisplayItem } from "~/components/media/display-items";
+import { useFilterPresets } from "~/lib/hooks/filters/use-presets";
+import { useFilterState } from "~/lib/hooks/filters/use-state";
+import { dayjsLib } from "~/lib/shared/date-utils";
+import {
+	useCoreDetails,
+	useUserCollections,
+	useUserDetails,
+	useUserPreferences,
+} from "~/lib/shared/hooks";
 import {
 	clientGqlService,
-	dayjsLib,
-	pageQueryParam,
+	queryClient,
 	queryFactory,
-} from "~/lib/common";
-import { useAppSearchParam, useUserPreferences } from "~/lib/hooks";
-import { useBulkEditCollection } from "~/lib/state/collection";
-import { useReviewEntity } from "~/lib/state/media";
+} from "~/lib/shared/react-query";
+import { convertEnumToSelectData } from "~/lib/shared/ui-utils";
 import {
-	getSearchEnhancedCookieName,
-	redirectToFirstPageIfOnInvalidPage,
-	redirectUsingEnhancedCookieSearchParams,
-	serverGqlService,
-} from "~/lib/utilities.server";
-import type { Route } from "./+types/_dashboard.collections.$id._index";
+	useBulkEditCollection,
+	useCreateOrUpdateCollectionModal,
+} from "~/lib/state/collection";
+import { useReviewEntity } from "~/lib/state/media";
+import type { FilterUpdateFunction } from "~/lib/types";
 
-const DEFAULT_TAB = "contents";
+enum TabNames {
+	Actions = "actions",
+	Reviews = "reviews",
+	Contents = "contents",
+	Recommendations = "recommendations",
+}
 
-const defaultFiltersValue = {
-	sort: CollectionContentsSortBy.LastUpdatedOn,
-	order: GraphqlSortOrder.Desc,
+const DEFAULT_TAB = TabNames.Contents;
+
+interface FilterState {
+	page: number;
+	query: string;
+	entityLot?: EntityLot;
+	metadataLot?: MediaLot;
+	orderBy: GraphqlSortOrder;
+	sortBy: CollectionContentsSortBy;
+}
+
+const defaultFilters: FilterState = {
+	page: 1,
+	query: "",
+	entityLot: undefined,
+	metadataLot: undefined,
+	orderBy: GraphqlSortOrder.Desc,
+	sortBy: CollectionContentsSortBy.LastUpdatedOn,
 };
 
-const searchParamsSchema = z.object({
-	query: z.string().optional(),
-	defaultTab: z.string().optional(),
-	[pageQueryParam]: zodIntAsString.optional(),
-	entityLot: z.nativeEnum(EntityLot).optional(),
-	metadataLot: z.nativeEnum(MediaLot).optional(),
-	orderBy: z.nativeEnum(GraphqlSortOrder).default(defaultFiltersValue.order),
-	sortBy: z
-		.nativeEnum(CollectionContentsSortBy)
-		.default(defaultFiltersValue.sort),
-});
-
-export type SearchParams = z.infer<typeof searchParamsSchema>;
-
-export const loader = async ({ request, params }: Route.LoaderArgs) => {
-	const { id: collectionId } = parseParameters(
-		params,
-		z.object({ id: z.string() }),
-	);
-	const cookieName = await getSearchEnhancedCookieName(
-		`collections.details.${collectionId}`,
-		request,
-	);
-	await redirectUsingEnhancedCookieSearchParams(request, cookieName);
-	const query = parseSearchQuery(request, searchParamsSchema);
-	const input: CollectionContentsInput = {
-		collectionId,
-		sort: { by: query.sortBy, order: query.orderBy },
-		search: { page: query[pageQueryParam], query: query.query },
-		filter: { entityLot: query.entityLot, metadataLot: query.metadataLot },
-	};
-	const [{ collectionContents }] = await Promise.all([
-		serverGqlService.authenticatedRequest(request, CollectionContentsDocument, {
-			input,
-		}),
-	]);
-	const totalPages = await redirectToFirstPageIfOnInvalidPage({
-		request,
-		currentPage: query[pageQueryParam] || 1,
-		totalResults: collectionContents.response.results.details.total,
-	});
-	return {
-		query,
-		cookieName,
-		totalPages,
-		collectionId,
-		queryInput: input,
-		collectionContents,
-	};
+export const meta = () => {
+	return [{ title: "Collection Details | Ryot" }];
 };
 
-export const meta = ({ data }: Route.MetaArgs) => {
-	return [
-		{ title: `${data?.collectionContents.response.details.name} | Ryot` },
-	];
-};
-
-export default function Page() {
-	const loaderData = useLoaderData<typeof loader>();
-	const userPreferences = useUserPreferences();
+export default function Page(props: { params: { id: string } }) {
 	const navigate = useNavigate();
-	const [tab, setTab] = useState<string | null>(
-		loaderData.query.defaultTab || DEFAULT_TAB,
-	);
-	const [_e, { setP }] = useAppSearchParam(loaderData.cookieName);
+	const userDetails = useUserDetails();
+	const coreDetails = useCoreDetails();
+	const { id: collectionId } = props.params;
+	const userPreferences = useUserPreferences();
+	const userCollections = useUserCollections();
 	const [_r, setEntityToReview] = useReviewEntity();
 	const bulkEditingCollection = useBulkEditCollection();
+	const [isReorderMode, setIsReorderMode] = useState(false);
+	const [tab, setTab] = useState<string | null>(DEFAULT_TAB);
+	const { open: openCollectionModal } = useCreateOrUpdateCollectionModal();
+
+	const filterState = useFilterState({
+		storageKey: `CollectionFilters-${collectionId}`,
+		defaultFilters,
+	});
+
 	const [
 		filtersModalOpened,
 		{ open: openFiltersModal, close: closeFiltersModal },
 	] = useDisclosure(false);
-	const details = loaderData.collectionContents.response;
-	const colDetails = {
+	const [
+		presetModalOpened,
+		{ open: openPresetModal, close: closePresetModal },
+	] = useDisclosure(false);
+
+	invariant(collectionId);
+
+	const contentsPresets = useFilterPresets({
+		enabled: true,
+		contextInformation: { collectionId },
+		filters: filterState.normalizedFilters,
+		setFilters: filterState.setFiltersState,
+		contextType: FilterPresetContextType.CollectionContents,
+		storageKeyPrefix: `CollectionContentsActivePreset_${collectionId}`,
+	});
+
+	const queryInput: CollectionContentsInput = useMemo(
+		() => ({
+			collectionId,
+			sort: {
+				by: filterState.normalizedFilters.sortBy,
+				order: filterState.normalizedFilters.orderBy,
+			},
+			search: {
+				page: filterState.normalizedFilters.page,
+				query: filterState.normalizedFilters.query,
+			},
+			filter: {
+				entityLot: filterState.normalizedFilters.entityLot,
+				metadataLot: filterState.normalizedFilters.metadataLot,
+			},
+		}),
+		[collectionId, filterState.normalizedFilters],
+	);
+
+	const { data: collectionContents, refetch: refreshCollectionContents } =
+		useQuery({
+			queryKey:
+				queryFactory.collections.collectionContents(queryInput).queryKey,
+			queryFn: () =>
+				clientGqlService
+					.request(CollectionContentsDocument, { input: queryInput })
+					.then((data) => data.collectionContents),
+		});
+
+	const details = collectionContents?.response;
+	const colDetails = details && {
+		id: collectionId,
 		name: details.details.name,
-		id: loaderData.collectionId,
 		creatorUserId: details.user.id,
 	};
-	const state = bulkEditingCollection.state;
+	const thisCollection = userCollections.find((c) => c.id === collectionId);
+	const areListFiltersActive = filterState.areFiltersActive;
 
 	return (
 		<>
-			<BulkEditingAffix
+			<FilterPresetModalManager
+				opened={presetModalOpened}
+				onClose={closePresetModal}
+				presetManager={contentsPresets}
+				placeholder="e.g., Favorite Collection View"
+			/>
+			<BulkCollectionEditingAffix
 				bulkAddEntities={async () => {
-					const input = cloneDeep(loaderData.queryInput);
+					const input = cloneDeep(queryInput);
 					input.search = { ...input.search, take: Number.MAX_SAFE_INTEGER };
 					return await clientGqlService
 						.request(CollectionContentsDocument, { input })
@@ -175,274 +211,313 @@ export default function Page() {
 			/>
 			<Container>
 				<Stack>
-					<Box>
-						<Title>{details.details.name}</Title>
-						<Text size="sm">
-							{details.totalItems} items, created by {details.user.name}{" "}
-							{dayjsLib(details.details.createdOn).fromNow()}
-						</Text>
-					</Box>
-					<Text>{details.details.description}</Text>
-					<Tabs value={tab} onChange={setTab} keepMounted={false}>
-						<Tabs.List mb="xs">
-							<Tabs.Tab
-								value="contents"
-								leftSection={<IconBucketDroplet size={16} />}
-							>
-								Contents
-							</Tabs.Tab>
-							<Tabs.Tab
-								value="recommendations"
-								leftSection={<IconStar size={16} />}
-							>
-								Recommendations
-							</Tabs.Tab>
-							<Tabs.Tab value="actions" leftSection={<IconUser size={16} />}>
-								Actions
-							</Tabs.Tab>
-							{!userPreferences.general.disableReviews ? (
-								<Tabs.Tab
-									value="reviews"
-									leftSection={<IconMessageCircle2 size={16} />}
-								>
-									Reviews
-								</Tabs.Tab>
-							) : null}
-						</Tabs.List>
-						<Tabs.Panel value="contents">
-							<Stack gap="xs">
-								<Group wrap="nowrap">
-									<DebouncedSearchInput
-										initialValue={loaderData.query.query}
-										placeholder="Search in the collection"
-										enhancedQueryParams={loaderData.cookieName}
-									/>
-									<ActionIcon
-										onClick={() => openFiltersModal()}
-										color={
-											loaderData.query.entityLot !== undefined ||
-											loaderData.query.metadataLot !== undefined ||
-											loaderData.query.sortBy !== defaultFiltersValue.sort ||
-											loaderData.query.orderBy !== defaultFiltersValue.order
-												? "blue"
-												: "gray"
-										}
+					{details ? (
+						<>
+							<Group justify="space-between" align="flex-start">
+								<Box>
+									<Group gap="md">
+										<Title>{details.details.name}</Title>
+										{userDetails.id === details.user.id ? (
+											<ActionIcon
+												color="blue"
+												variant="outline"
+												onClick={() => {
+													if (!thisCollection) return;
+													openCollectionModal({
+														collectionId: thisCollection.id,
+													});
+												}}
+											>
+												<IconEdit size={18} />
+											</ActionIcon>
+										) : null}
+									</Group>
+									<Text size="sm">
+										Created by {details.user.name}{" "}
+										{dayjsLib(details.details.createdOn).fromNow()}
+									</Text>
+								</Box>
+							</Group>
+							<Text>{details.details.description}</Text>
+							<Tabs value={tab} onChange={setTab} keepMounted={false}>
+								<Tabs.List mb="xs">
+									<Tabs.Tab
+										value={TabNames.Contents}
+										leftSection={<IconBucketDroplet size={16} />}
 									>
-										<IconFilter size={24} />
-									</ActionIcon>
-									<FiltersModal
-										closeFiltersModal={closeFiltersModal}
-										cookieName={loaderData.cookieName}
-										opened={filtersModalOpened}
+										Contents
+									</Tabs.Tab>
+									<Tabs.Tab
+										value={TabNames.Recommendations}
+										leftSection={<IconStar size={16} />}
 									>
-										<FiltersModalForm />
-									</FiltersModal>
-								</Group>
-								<DisplayListDetailsAndRefresh
-									total={details.results.details.total}
-									cacheId={loaderData.collectionContents.cacheId}
-								/>
-								{details.results.items.length > 0 ? (
-									<ApplicationGrid>
-										{details.results.items.map((lm) => {
-											const isAdded = bulkEditingCollection.isAdded(lm);
-											return (
-												<DisplayCollectionEntity
-													key={lm.entityId}
-													entityId={lm.entityId}
-													entityLot={lm.entityLot}
-													topRight={
-														state && state.data.action === "remove" ? (
-															<ActionIcon
-																variant={isAdded ? "filled" : "transparent"}
-																color="red"
-																onClick={() => {
-																	if (isAdded) state.remove(lm);
-																	else state.add(lm);
-																}}
-															>
-																<IconTrashFilled size={18} />
-															</ActionIcon>
-														) : null
+										Recommendations
+									</Tabs.Tab>
+									<Tabs.Tab
+										value={TabNames.Actions}
+										leftSection={<IconUser size={16} />}
+									>
+										Actions
+									</Tabs.Tab>
+									{!userPreferences.general.disableReviews ? (
+										<Tabs.Tab
+											value={TabNames.Reviews}
+											leftSection={<IconMessageCircle2 size={16} />}
+										>
+											Reviews
+										</Tabs.Tab>
+									) : null}
+								</Tabs.List>
+								<Tabs.Panel value={TabNames.Contents}>
+									<Stack>
+										{!isReorderMode ? (
+											<>
+												<Group wrap="nowrap">
+													<DebouncedSearchInput
+														onChange={filterState.updateQuery}
+														placeholder="Search in the collection"
+														value={filterState.normalizedFilters.query}
+													/>
+													<ActionIcon
+														onClick={() => openFiltersModal()}
+														color={areListFiltersActive ? "blue" : "gray"}
+													>
+														<IconFilter size={24} />
+													</ActionIcon>
+													<FiltersModal
+														opened={filtersModalOpened}
+														onSavePreset={openPresetModal}
+														closeFiltersModal={closeFiltersModal}
+														resetFilters={filterState.resetFilters}
+													>
+														<FiltersModalForm
+															filters={filterState.normalizedFilters}
+															updateFilter={filterState.updateFilter}
+														/>
+													</FiltersModal>
+												</Group>
+												<FilterPresetBar presetManager={contentsPresets} />
+												<DisplayListDetailsAndRefresh
+													total={details.totalItems}
+													cacheId={collectionContents?.cacheId}
+													onRefreshButtonClicked={refreshCollectionContents}
+													isRandomSortOrderSelected={
+														filterState.normalizedFilters.sortBy ===
+														CollectionContentsSortBy.Random
 													}
 												/>
-											);
-										})}
-									</ApplicationGrid>
-								) : (
-									<Text>You have not added anything this collection</Text>
-								)}
-								{details.details ? (
-									<Center>
-										<Pagination
-											size="sm"
-											total={loaderData.totalPages}
-											value={loaderData.query[pageQueryParam]}
-											onChange={(v) => setP(pageQueryParam, v.toString())}
+											</>
+										) : (
+											<Group justify="end">
+												<Button
+													variant="outline"
+													onClick={() => setIsReorderMode(false)}
+												>
+													Done Reordering
+												</Button>
+											</Group>
+										)}
+										{details.results.items.length > 0 ? (
+											<ApplicationGrid>
+												{details.results.items.map((lm, index) => (
+													<CollectionItem
+														item={lm}
+														key={lm.entityId}
+														rankNumber={index + 1}
+														isReorderMode={isReorderMode}
+														collectionName={details.details.name}
+														totalItems={details.results.items.length}
+													/>
+												))}
+											</ApplicationGrid>
+										) : (
+											<Text>
+												You have not added anything to this collection
+											</Text>
+										)}
+										<ApplicationPagination
+											value={filterState.normalizedFilters.page}
+											totalItems={details.results.details.totalItems}
+											onChange={(v) => filterState.updateFilter("page", v)}
 										/>
-									</Center>
-								) : null}
-							</Stack>
-						</Tabs.Panel>
-						<Tabs.Panel value="recommendations">
-							<RecommendationsSection />
-						</Tabs.Panel>
-						<Tabs.Panel value="actions">
-							<SimpleGrid cols={{ base: 2, md: 3, lg: 4 }} spacing="lg">
-								<Button
-									variant="outline"
-									w="100%"
-									onClick={() => {
-										setEntityToReview({
-											entityLot: EntityLot.Collection,
-											entityId: loaderData.collectionId,
-											entityTitle: details.details.name,
-										});
-									}}
-								>
-									Post a review
-								</Button>
-								<Button
-									w="100%"
-									variant="outline"
-									onClick={() => {
-										bulkEditingCollection.start(colDetails, "add");
-										navigate(
-											$path("/media/:action/:lot", {
-												action: "list",
-												lot: MediaLot.Movie,
-											}),
-										);
-									}}
-								>
-									Bulk add
-								</Button>
-								<Button
-									w="100%"
-									variant="outline"
-									disabled={details.results.details.total === 0}
-									onClick={() => {
-										bulkEditingCollection.start(colDetails, "remove");
-										setTab("contents");
-									}}
-								>
-									Bulk remove
-								</Button>
-							</SimpleGrid>
-						</Tabs.Panel>
-						{!userPreferences.general.disableReviews ? (
-							<Tabs.Panel value="reviews">
-								{details.reviews.length > 0 ? (
-									<Stack>
-										{details.reviews.map((r) => (
-											<ReviewItemDisplay
-												review={r}
-												key={r.id}
-												entityLot={EntityLot.Collection}
-												entityId={loaderData.collectionId}
-												title={details.details.name}
-											/>
-										))}
 									</Stack>
-								) : (
-									<Text>No reviews</Text>
-								)}
-							</Tabs.Panel>
-						) : null}
-					</Tabs>
+								</Tabs.Panel>
+								<Tabs.Panel value={TabNames.Recommendations}>
+									<RecommendationsSection collectionId={collectionId} />
+								</Tabs.Panel>
+								<Tabs.Panel value={TabNames.Actions}>
+									<SimpleGrid cols={{ base: 2, md: 3, lg: 4 }} spacing="lg">
+										<Button
+											variant="outline"
+											w="100%"
+											onClick={() => {
+												setEntityToReview({
+													entityId: collectionId,
+													entityLot: EntityLot.Collection,
+													entityTitle: details.details.name,
+												});
+											}}
+										>
+											Post a review
+										</Button>
+										<Button
+											w="100%"
+											variant="outline"
+											onClick={() => {
+												if (!colDetails) return;
+												bulkEditingCollection.start(colDetails, "add");
+												navigate(
+													$path("/media/:action/:lot", {
+														action: "list",
+														lot: MediaLot.Movie,
+													}),
+												);
+											}}
+										>
+											Bulk add
+										</Button>
+										<Button
+											w="100%"
+											variant="outline"
+											disabled={details.results.details.totalItems === 0}
+											onClick={() => {
+												if (!colDetails) return;
+												bulkEditingCollection.start(colDetails, "remove");
+												setTab(TabNames.Contents);
+											}}
+										>
+											Bulk remove
+										</Button>
+										<Button
+											w="100%"
+											variant="outline"
+											disabled={details.results.details.totalItems === 0}
+											onClick={() => {
+												if (isReorderMode) {
+													setIsReorderMode(false);
+													return;
+												}
+												if (!coreDetails.isServerKeyValidated) {
+													notifications.show({
+														color: "red",
+														title: "Pro Required",
+														message:
+															"Collection reordering requires a validated server key.",
+													});
+													return;
+												}
+												filterState.setFiltersState({
+													...defaultFilters,
+													orderBy: GraphqlSortOrder.Asc,
+													sortBy: CollectionContentsSortBy.Rank,
+												});
+												setTab(TabNames.Contents);
+												setIsReorderMode(true);
+											}}
+										>
+											{isReorderMode ? "Exit Reorder Mode" : "Reorder items"}
+										</Button>
+									</SimpleGrid>
+								</Tabs.Panel>
+								{!userPreferences.general.disableReviews ? (
+									<Tabs.Panel value={TabNames.Reviews}>
+										{details.reviews.length > 0 ? (
+											<Stack>
+												{details.reviews.map((r) => (
+													<ReviewItemDisplay
+														review={r}
+														key={r.id}
+														entityId={collectionId}
+														title={details.details.name}
+														entityLot={EntityLot.Collection}
+													/>
+												))}
+											</Stack>
+										) : (
+											<Text>No reviews</Text>
+										)}
+									</Tabs.Panel>
+								) : null}
+							</Tabs>
+						</>
+					) : (
+						<SkeletonLoader />
+					)}
 				</Stack>
 			</Container>
 		</>
 	);
 }
 
-const FiltersModalForm = () => {
-	const loaderData = useLoaderData<typeof loader>();
-	const [_, { setP }] = useAppSearchParam(loaderData.cookieName);
-
-	return (
-		<>
-			<Flex gap="xs" align="center">
-				<Select
-					w="100%"
-					data={[
-						{
-							group: "Sort by",
-							items: Object.values(CollectionContentsSortBy).map((o) => ({
-								value: o.toString(),
-								label: startCase(o.toLowerCase()),
-							})),
-						},
-					]}
-					defaultValue={loaderData.query.sortBy}
-					onChange={(v) => setP("sortBy", v)}
-				/>
-				<ActionIcon
-					onClick={() => {
-						if (loaderData.query.orderBy === GraphqlSortOrder.Asc)
-							setP("orderBy", GraphqlSortOrder.Desc);
-						else setP("orderBy", GraphqlSortOrder.Asc);
-					}}
-				>
-					{loaderData.query.orderBy === GraphqlSortOrder.Asc ? (
-						<IconSortAscending />
-					) : (
-						<IconSortDescending />
-					)}
-				</ActionIcon>
-			</Flex>
+const FiltersModalForm = (props: {
+	filters: FilterState;
+	updateFilter: FilterUpdateFunction<FilterState>;
+}) => (
+	<>
+		<Flex gap="xs" align="center">
 			<Select
-				placeholder="Select an entity type"
-				defaultValue={loaderData.query.entityLot}
-				data={Object.values(EntityLot)
-					.filter(
-						(o) =>
-							![
-								EntityLot.Collection,
-								EntityLot.Review,
-								EntityLot.UserMeasurement,
-							].includes(o),
-					)
-					.map((o) => ({
-						value: o.toString(),
-						label: startCase(o.toLowerCase()),
-					}))}
-				onChange={(v) => setP("entityLot", v)}
-				clearable
+				w="100%"
+				value={props.filters.sortBy}
+				onChange={(v) =>
+					props.updateFilter("sortBy", v as CollectionContentsSortBy)
+				}
+				data={[
+					{
+						group: "Sort by",
+						items: convertEnumToSelectData(CollectionContentsSortBy),
+					},
+				]}
 			/>
-			{loaderData.query.entityLot === EntityLot.Metadata ||
-			loaderData.query.entityLot === EntityLot.MetadataGroup ? (
-				<Select
-					placeholder="Select a media type"
-					defaultValue={loaderData.query.metadataLot}
-					data={Object.values(MediaLot).map((o) => ({
-						value: o.toString(),
-						label: startCase(o.toLowerCase()),
-					}))}
-					onChange={(v) => setP("metadataLot", v)}
-					clearable
+			{props.filters.sortBy !== CollectionContentsSortBy.Random ? (
+				<SortOrderToggle
+					currentOrder={props.filters.orderBy}
+					onOrderChange={(order) => props.updateFilter("orderBy", order)}
 				/>
 			) : null}
-		</>
-	);
-};
+		</Flex>
+		<Select
+			clearable
+			value={props.filters.entityLot}
+			placeholder="Select an entity type"
+			onChange={(v) => props.updateFilter("entityLot", v as EntityLot)}
+			data={convertEnumToSelectData(
+				Object.values(EntityLot).filter(
+					(o) =>
+						![
+							EntityLot.Review,
+							EntityLot.Collection,
+							EntityLot.UserMeasurement,
+						].includes(o),
+				),
+			)}
+		/>
+		{props.filters.entityLot === EntityLot.Metadata ||
+		props.filters.entityLot === EntityLot.MetadataGroup ? (
+			<Select
+				clearable
+				placeholder="Select a media type"
+				defaultValue={props.filters.metadataLot}
+				data={convertEnumToSelectData(MediaLot)}
+				onChange={(v) => props.updateFilter("metadataLot", v as MediaLot)}
+			/>
+		) : null}
+	</>
+);
 
-const RecommendationsSection = () => {
-	const loaderData = useLoaderData<typeof loader>();
-	const userPreferences = useUserPreferences();
-
-	const [searchInput, setSearchInput] = useLocalStorage(
-		"CollectionRecommendationsSearchInput",
+const RecommendationsSection = (props: { collectionId: string }) => {
+	const [search, setSearchInput] = useLocalStorage(
+		`CollectionRecommendationsSearchInput-${props.collectionId}`,
 		{ page: 1, query: "" },
 	);
 
 	const input: CollectionRecommendationsInput = {
-		collectionId: loaderData.collectionId,
-		search: searchInput,
+		search,
+		collectionId: props.collectionId,
 	};
 
 	const recommendations = useQuery({
-		queryKey: queryFactory.collections.recommendations(input).queryKey,
+		queryKey:
+			queryFactory.collections.collectionRecommendations(input).queryKey,
 		queryFn: () =>
 			clientGqlService.request(CollectionRecommendationsDocument, { input }),
 	});
@@ -450,40 +525,112 @@ const RecommendationsSection = () => {
 	return (
 		<Stack gap="xs">
 			<DebouncedSearchInput
-				initialValue={searchInput.query}
-				onChange={(query) => setSearchInput({ ...searchInput, query })}
+				value={search.query}
+				placeholder="Search recommendations"
+				onChange={(query) => setSearchInput({ ...search, query })}
 			/>
 			{recommendations.data ? (
-				<>
-					<DisplayListDetailsAndRefresh
-						total={
-							recommendations.data?.collectionRecommendations.details.total
-						}
-					/>
-					<ApplicationGrid>
-						{recommendations.data.collectionRecommendations.items.map((r) => (
-							<MetadataDisplayItem
-								key={r}
-								metadataId={r}
-								shouldHighlightNameIfInteracted
-							/>
-						))}
-					</ApplicationGrid>
-					<Center>
-						<Pagination
-							size="sm"
-							value={searchInput.page}
-							onChange={(v) => setSearchInput({ ...searchInput, page: v })}
-							total={Math.ceil(
-								recommendations.data.collectionRecommendations.details.total /
-									userPreferences.general.listPageSize,
-							)}
+				recommendations.data.collectionRecommendations.details.totalItems >
+				0 ? (
+					<>
+						<ApplicationGrid>
+							{recommendations.data.collectionRecommendations.items.map((r) => (
+								<MetadataDisplayItem
+									key={r}
+									metadataId={r}
+									shouldHighlightNameIfInteracted
+								/>
+							))}
+						</ApplicationGrid>
+						<ApplicationPagination
+							value={search.page}
+							onChange={(v) => setSearchInput({ ...search, page: v })}
+							totalItems={
+								recommendations.data.collectionRecommendations.details
+									.totalItems
+							}
 						/>
-					</Center>
-				</>
+					</>
+				) : (
+					<Text>No recommendations found</Text>
+				)
 			) : (
-				<Skeleton height={100} />
+				<SkeletonLoader />
 			)}
 		</Stack>
+	);
+};
+
+type CollectionItemProps = {
+	rankNumber: number;
+	totalItems: number;
+	item: EntityWithLot;
+	collectionName: string;
+	isReorderMode: boolean;
+};
+
+const CollectionItem = (props: CollectionItemProps) => {
+	const bulkEditingCollection = useBulkEditCollection();
+	const state = bulkEditingCollection.state;
+	const isAdded = bulkEditingCollection.isAdded(props.item);
+
+	const reorderMutation = useMutation({
+		mutationFn: (input: ReorderCollectionEntityInput) =>
+			clientGqlService.request(ReorderCollectionEntityDocument, { input }),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: queryFactory.collections.collectionContents._def,
+			});
+		},
+		onError: (_error) => {
+			notifications.show({
+				color: "red",
+				title: "Error",
+				message: "Failed to reorder item. Please try again.",
+			});
+		},
+	});
+
+	const handleRankClick = () => {
+		if (!props.isReorderMode) return;
+
+		const newRank = prompt(
+			`Enter new rank for this item (1-${props.totalItems}):`,
+		);
+		const rank = Number(newRank);
+		if (newRank && isNumber(rank))
+			if (rank >= 1 && rank <= props.totalItems)
+				reorderMutation.mutate({
+					newPosition: rank,
+					entityId: props.item.entityId,
+					collectionName: props.collectionName,
+				});
+	};
+
+	return (
+		<DisplayCollectionEntity
+			entityId={props.item.entityId}
+			entityLot={props.item.entityLot}
+			centerElement={
+				props.isReorderMode ? (
+					<ActionIcon variant="filled" onClick={handleRankClick}>
+						<Text size="xs" fw={700} c="white">
+							{props.rankNumber}
+						</Text>
+					</ActionIcon>
+				) : state && state.data.action === "remove" ? (
+					<ActionIcon
+						color="red"
+						variant={isAdded ? "filled" : "transparent"}
+						onClick={() => {
+							if (isAdded) state.remove(props.item);
+							else state.add(props.item);
+						}}
+					>
+						<IconTrashFilled size={18} />
+					</ActionIcon>
+				) : null
+			}
+		/>
 	);
 };
