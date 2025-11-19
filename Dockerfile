@@ -23,7 +23,7 @@ RUN moon run frontend:build
 RUN moon docker prune
 
 # Stage 4: Build backend binaries
-FROM rust:latest AS backend-builder
+FROM rust:1-bookworm AS backend-builder
 
 # Build-time arguments
 ARG DATABASE_URL
@@ -53,6 +53,8 @@ RUN rustup target add x86_64-unknown-linux-gnu
 
 WORKDIR /app
 COPY . .
+# ADD THIS LINE to reduce memory usage during the build
+ENV CARGO_BUILD_JOBS=2
 
 # Build for x86_64
 RUN cargo build --release --target x86_64-unknown-linux-gnu
